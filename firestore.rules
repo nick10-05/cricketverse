@@ -1,0 +1,234 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =============================================
+    // HELPER FUNCTIONS
+    // =============================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRole(role) {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+
+    function isAdmin() {
+      return hasRole('admin');
+    }
+
+    function isModerator() {
+      return hasRole('moderator') || isAdmin();
+    }
+
+    function userExists(uid) {
+      return exists(/databases/$(database)/documents/users/$(uid));
+    }
+
+    // =============================================
+    // USERS
+    // =============================================
+    match /users/{userId} {
+      // Users can read any public profile
+      allow read: if isAuthenticated();
+
+      // Users can write only their own data
+      // Admins can manage roles and bans
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId)
+        || (isAdmin() && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['role', 'isBanned', 'banReason']));
+      allow delete: if isAdmin();
+
+      // =============================================
+      // NOTIFICATIONS (subcollection)
+      // =============================================
+      match /notifications/{notificationId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId);
+        allow update: if isOwner(userId);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // =============================================
+    // TOURNAMENTS
+    // =============================================
+    match /tournaments/{tournamentId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAdmin();
+
+      // =============================================
+      // TOURNAMENT TEAMS (subcollection)
+      // =============================================
+      match /teams/{teamId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update: if isAuthenticated();
+        allow delete: if isModerator();
+      }
+
+      // =============================================
+      // TOURNAMENT MATCHES (subcollection)
+      // =============================================
+      match /matches/{matchId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update: if isAuthenticated();
+        allow delete: if isAdmin();
+
+        // Match results (subcollection)
+        match /result/{resultId} {
+          allow read: if isAuthenticated();
+          allow create: if isAuthenticated();
+          allow update: if isAuthenticated();
+          allow delete: if isAdmin();
+        }
+      }
+    }
+
+    // =============================================
+    // GAME SESSIONS (real-time match play)
+    // =============================================
+    match /game_sessions/{sessionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAdmin();
+
+      // Delivery turns (subcollection)
+      match /turns/{turnId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update: if isAuthenticated();
+        allow delete: if isAdmin();
+      }
+
+      // Team chat (subcollection)
+      match /team_chat/{chatId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update: if isAuthenticated();
+        allow delete: if isModerator();
+      }
+    }
+
+    // =============================================
+    // PLAYER PROFILES
+    // =============================================
+    match /players/{playerId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isOwner(playerId) || isModerator();
+      allow delete: if isAdmin();
+
+      // =============================================
+      // MATCH HISTORY (subcollection)
+      // =============================================
+      match /match_history/{matchId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update: if isAuthenticated();
+        allow delete: if isAdmin();
+      }
+    }
+
+    // =============================================
+    // PLAYER PROGRESSION STATS
+    // =============================================
+    match /player_progression/{playerId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if isOwner(playerId) || isModerator();
+      allow delete: if isAdmin();
+    }
+
+    // =============================================
+    // MESSAGES
+    // =============================================
+    match /messages/{messageId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update: if request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['read', 'readAt']);
+      allow delete: if isOwner(resource.data.senderId) || isOwner(resource.data.receiverId);
+    }
+
+    // =============================================
+    // CONVERSATIONS
+    // =============================================
+    match /conversations/{conversationId} {
+      allow read: if isAuthenticated() && request.auth.uid in resource.data.participants;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && request.auth.uid in resource.data.participants;
+      allow delete: if isAdmin();
+    }
+
+    // =============================================
+    // RANKINGS
+    // =============================================
+    match /rankings/{rankingId} {
+      allow read: if isAuthenticated();
+      // Rankings are updated by the system (via admin functions)
+      allow write: if isAdmin();
+    }
+
+    // =============================================
+    // FRIEND REQUESTS
+    // =============================================
+    match /friendRequests/{requestId} {
+      allow read: if isAuthenticated()
+        && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated()
+        && (request.auth.uid == resource.data.from || request.auth.uid == resource.data.to);
+      allow delete: if isOwner(resource.data.from) || isOwner(resource.data.to);
+    }
+
+    // =============================================
+    // ACHIEVEMENTS
+    // =============================================
+    match /achievements/{achievementId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // =============================================
+    // ABUSE REPORTS
+    // =============================================
+    match /reports/{reportId} {
+      allow read: if isModerator();
+      allow create: if isAuthenticated();
+      allow update: if isModerator();
+      allow delete: if isAdmin();
+    }
+
+    // =============================================
+    // AUDIT LOGS
+    // =============================================
+    match /auditLogs/{logId} {
+      allow read: if isModerator();
+      allow create: if isAuthenticated();
+      allow update: if false; // Immutable
+      allow delete: if false; // Immutable
+    }
+
+    // =============================================
+    // DENY ALL OTHER ACCESS
+    // =============================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

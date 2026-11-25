@@ -1,0 +1,109 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Bebas Neue", Impact, sans-serif;
+  --font-sans: "Outfit", system-ui, sans-serif;
+  --color-blaze: #ff6a1f;
+  --color-tide: #1aa7ff;
+  --color-ink: #070b1a;
+  --color-gold: #ffd23f;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: #070b1a;
+  color: #fff;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.glass {
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+.btn-primary {
+  background: linear-gradient(180deg, #ffde59, #ffb81f);
+  color: #1a1203;
+  box-shadow: 0 6px 0 #b9790a, 0 10px 24px rgba(255, 184, 31, 0.35);
+  transition: transform 0.08s, box-shadow 0.08s;
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(4px);
+  box-shadow: 0 2px 0 #b9790a, 0 4px 12px rgba(255, 184, 31, 0.3);
+}
+.btn-primary:disabled {
+  filter: grayscale(0.8) brightness(0.7);
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  transition: background 0.15s;
+}
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(0.3) rotate(-6deg);
+    opacity: 0;
+  }
+  55% {
+    transform: scale(1.18) rotate(2deg);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) rotate(0);
+    opacity: 1;
+  }
+}
+.animate-pop {
+  animation: pop 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+.animate-rise {
+  animation: rise 0.35s ease-out both;
+}
+
+.text-stroke {
+  -webkit-text-stroke: 2px rgba(0, 0, 0, 0.35);
+  paint-order: stroke fill;
+}
+
+input[type="range"] {
+  accent-color: #ffd23f;
+}
+
+@keyframes grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+[class*="animate-[grow"] {
+  transform-origin: left;
+}
