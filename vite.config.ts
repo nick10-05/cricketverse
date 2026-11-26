@@ -16,7 +16,7 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id: string) {
-          if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/') || id.includes('node_modules/react-router')) {
+          if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) {
             return 'vendor'
           }
           if (id.includes('node_modules/three')) {
@@ -28,7 +28,8 @@ export default defineConfig({
   },
   test: {
     globals: true,
-    environment: 'jsdom',
+    environment: 'node',
+    include: ['src/**/*.test.ts', 'server/**/*.test.ts'],
     css: true,
     coverage: {
       provider: 'v8',

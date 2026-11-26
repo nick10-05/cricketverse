@@ -1,0 +1,13 @@
+# One-click deploy on Render (free tier works). The Node server serves the built
+# client and the Socket.IO game rooms from a single web service.
+services:
+  - type: web
+    name: cricketverse-arena
+    runtime: node
+    plan: free
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 20

@@ -1,7 +1,18 @@
 {
-  "name": "cricketverse",
+  "name": "cricketverse-arena",
+  "description": "Open-source 3D online cricket game: private rooms with friends, 1v1 to 11v11, 1 to 30 overs.",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "license": "MIT",
+  "author": "nick10-05",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nick10-05/cricketverse.git"
+  },
+  "homepage": "https://github.com/nick10-05/cricketverse#readme",
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,15 +21,14 @@
     "preview": "vite preview",
     "test": "vitest run",
     "server": "tsx watch server/index.ts",
-    "start": "tsx server/index.ts"
+    "start": "tsx server/index.ts",
+    "smoke": "tsx scripts/smoke-server.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.0",
-    "firebase": "^12.14.0",
     "peerjs": "^1.5.4",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "react-router-dom": "^7.17.0",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1",
     "tailwindcss": "^4.3.0",
