@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GameEvent, RoomClient, RoomSnapshot } from '../net/client'
 import type { BallOutcome, Delivery, DeliveryType, FieldSetting, MatchState, ShotInput, TeamId } from '../game/types'
 import { CREASE_Z, DELIVERY_INFO, randomSeed, resolveBall } from '../game/physics'
-import { applyFreeHit, bowlerQuota, nonStrikerOf, other, oversText, requiredRate } from '../game/rules'
+import { applyFreeHit, bowlerQuota, inningsOvers, inningsWickets, nonStrikerOf, other, oversText, requiredRate } from '../game/rules'
 import { Scene, TEAM_COLORS } from '../render/scene'
 import { detectQuality, Scene3D, type Quality } from '../render3d/Scene3D'
 import { ScoreTicker } from './ScoreTicker'
@@ -428,7 +428,8 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
               <ScoreTicker runs={inn.runs} wickets={inn.wickets} />
               <div className="text-xs sm:text-sm text-white/70 leading-tight">
                 <div>
-                  Ov <b className="text-white">{oversText(inn.balls)}</b>/{shown.settings.overs}
+                  {inn.superOver ? <b className="text-gold mr-1">SUPER OVER</b> : null}
+                  Ov <b className="text-white">{oversText(inn.balls)}</b>/{inningsOvers(shown.settings.overs, inn)}
                 </div>
                 {rr ? (
                   <div className="text-gold">
@@ -643,22 +644,43 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       )}
 
       {/* Innings break */}
-      {idle && match.phase === 'break' && (
-        <Overlay>
-          <div className="text-xs uppercase tracking-[0.3em] text-white/50">Innings break</div>
-          <div className="font-display text-5xl mt-1" style={{ color: TEAM_COLORS[match.innings[0].batting].main }}>
-            {match.settings.teamNames[match.innings[0].batting]} {match.innings[0].runs}/{match.innings[0].wickets}
-          </div>
-          <div className="text-lg mt-2">
-            <b style={{ color: TEAM_COLORS[match.innings[1].batting].main }}>{match.settings.teamNames[match.innings[1].batting]}</b> need{' '}
-            <b className="text-gold">{match.innings[1].target}</b> to win
-          </div>
-          <div className="mt-4 h-1.5 w-48 mx-auto rounded-full bg-white/10 overflow-hidden">
-            <div className="h-full bg-gold animate-[grow_6.5s_linear_forwards]" style={{ width: '100%' }} />
-          </div>
-          <div className="text-xs text-white/45 mt-2">Second innings starting…</div>
-        </Overlay>
-      )}
+      {idle && match.phase === 'break' && (() => {
+        const up = match.innings[match.current]
+        const prev = match.innings[match.current - 1]
+        const tn = match.settings.teamNames
+        const so = up.superOver
+        return (
+          <Overlay>
+            <div className={`text-xs uppercase tracking-[0.3em] ${so ? 'text-gold' : 'text-white/50'}`}>
+              {so ? (up.target === null ? (so > 1 ? `Tied again · super over ${so}` : 'Scores level') : `Super over${so > 1 ? ` ${so}` : ''} · chase`) : 'Innings break'}
+            </div>
+            {so && up.target === null ? (
+              <>
+                <div className="font-display text-6xl mt-1 tracking-wide text-gold">SUPER OVER!</div>
+                <div className="text-lg mt-2">
+                  Both teams on <b>{prev.runs}</b>.{' '}
+                  <b style={{ color: TEAM_COLORS[up.batting].main }}>{tn[up.batting]}</b> bat first
+                </div>
+                <div className="text-sm text-white/55 mt-1">1 over · {inningsWickets(match, up)} wicket{inningsWickets(match, up) > 1 ? 's' : ''} each</div>
+              </>
+            ) : (
+              <>
+                <div className="font-display text-5xl mt-1" style={{ color: TEAM_COLORS[prev.batting].main }}>
+                  {tn[prev.batting]} {prev.runs}/{prev.wickets}
+                </div>
+                <div className="text-lg mt-2">
+                  <b style={{ color: TEAM_COLORS[up.batting].main }}>{tn[up.batting]}</b> need <b className="text-gold">{up.target}</b> to win
+                  {so ? ' off 1 over' : ''}
+                </div>
+              </>
+            )}
+            <div className="mt-4 h-1.5 w-48 mx-auto rounded-full bg-white/10 overflow-hidden">
+              <div className="h-full bg-gold animate-[grow_6.5s_linear_forwards]" style={{ width: '100%' }} />
+            </div>
+            <div className="text-xs text-white/45 mt-2">{so ? 'Super over starting…' : 'Second innings starting…'}</div>
+          </Overlay>
+        )
+      })()}
 
       {/* Result */}
       {idle && match.phase === 'done' && match.result && (

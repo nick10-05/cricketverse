@@ -26,7 +26,14 @@ function InningsCard({ match, inn }: { match: MatchState; inn: Innings }) {
   return (
     <div className="rounded-2xl overflow-hidden" style={{ background: 'rgba(7,11,26,0.85)', border: '1px solid rgba(255,255,255,0.1)' }}>
       <div className="px-4 py-2 flex justify-between items-center" style={{ background: `linear-gradient(120deg, ${col.main}, ${col.dark})` }}>
-        <span className="font-display text-2xl tracking-wide">{match.settings.teamNames[inn.batting]}</span>
+        <span className="font-display text-2xl tracking-wide">
+          {match.settings.teamNames[inn.batting]}
+          {inn.superOver ? (
+            <span className="ml-2 align-middle rounded-full bg-black/35 px-2 py-0.5 font-sans text-[10px] font-bold uppercase tracking-wider text-gold">
+              Super over{inn.superOver > 1 ? ` ${inn.superOver}` : ''}
+            </span>
+          ) : null}
+        </span>
         <span className="font-display text-2xl">
           {inn.runs}/{inn.wickets} <span className="text-base opacity-80">({oversText(inn.balls)})</span>
         </span>
@@ -111,7 +118,8 @@ function InningsCard({ match, inn }: { match: MatchState; inn: Innings }) {
 
 /** Cumulative runs per over for both innings ("worm" chart). */
 function RunChart({ match }: { match: MatchState }) {
-  const series = match.innings.map((inn) => ({ team: inn.batting, pts: [0, ...(inn.overRuns ?? [])] }))
+  // the worm covers the main innings; super overs have their own cards
+  const series = match.innings.filter((inn) => !inn.superOver).map((inn) => ({ team: inn.batting, pts: [0, ...(inn.overRuns ?? [])] }))
   const maxRuns = Math.max(10, ...series.flatMap((s) => s.pts))
   const overs = Math.max(1, match.settings.overs)
   if (series.every((s) => s.pts.length < 2)) return null

@@ -35,7 +35,8 @@ export function recordMatch(m: MatchState, myId: string) {
     let wickets = 0
     let conceded = 0
     let bowled = 0
-    for (const inn of m.innings) {
+    // as in real cricket, super-over runs and wickets don't count towards career stats
+    for (const inn of m.innings.filter((i) => !i.superOver)) {
       const b = inn.batters[myId]
       if (b) {
         runs += b.runs
@@ -53,7 +54,7 @@ export function recordMatch(m: MatchState, myId: string) {
   const rec: MatchRecord = {
     at: m.startedAt,
     teamNames: m.settings.teamNames,
-    scores: m.innings.map((i) => `${m.settings.teamNames[i.batting]} ${i.runs}/${i.wickets} (${Math.floor(i.balls / 6)}.${i.balls % 6})`),
+    scores: m.innings.map((i) => `${i.superOver ? 'Super over: ' : ''}${m.settings.teamNames[i.batting]} ${i.runs}/${i.wickets} (${Math.floor(i.balls / 6)}.${i.balls % 6})`),
     result: m.result.text,
     overs: m.settings.overs,
     mode: m.settings.mode,

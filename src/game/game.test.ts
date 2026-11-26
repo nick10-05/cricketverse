@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { gradeTiming, resolveBall, trajectory, classifyShot } from './physics'
-import { applyBall, applyFreeHit, createMatch, isMode } from './rules'
+import { applyBall, applyFreeHit, createMatch, inningsOvers, inningsWickets, isMode, MAX_SUPER_OVERS, startSecondInnings } from './rules'
 import { DEFAULT_SETTINGS, Room, sanitizeSettings } from './room'
-import type { BallOutcome, Delivery, MatchSettings } from './types'
+import type { BallOutcome, Delivery, MatchSettings, MatchState } from './types'
 import type { HostMsg } from '../net/protocol'
 
 const delivery = (over: Partial<Delivery> = {}): Delivery => ({ type: 'fast', line: 0, length: 0.5, power: 0.9, turn: 1, seed: 1234, ...over })
@@ -89,6 +89,75 @@ describe('rules', () => {
   })
 })
 
+describe('super over', () => {
+  const resume = (m: MatchState): MatchState => startSecondInnings(m)
+  /** Both sides bowled out for `runs`: one scoring shot then two wickets. */
+  const scoreAndOut = (m: MatchState, runs: number) => {
+    if (runs) m = applyBall(m, { ...dot, runs })
+    m = applyBall(m, { ...dot, wicket: 'bowled' })
+    return applyBall(m, { ...dot, wicket: 'bowled' })
+  }
+  const tiedMatch = () => {
+    let m = createMatch({ ...settings, overs: 2, wickets: 3 }, { A: ['a1', 'a2', 'a3'], B: ['b1', 'b2', 'b3'] }, { a1: 'A1', a2: 'A2', a3: 'A3', b1: 'B1', b2: 'B2', b3: 'B3' }, 'A', 'A')
+    m = applyBall(m, { ...dot, runs: 4, boundary: 4 })
+    for (let i = 0; i < 3; i++) m = applyBall(m, { ...dot, wicket: 'bowled' })
+    m = resume(m)
+    m = applyBall(m, { ...dot, runs: 4, boundary: 4 })
+    for (let i = 0; i < 3; i++) m = applyBall(m, { ...dot, wicket: 'bowled' })
+    return m
+  }
+
+  it('a tie goes to a super over, with the side that batted second batting first', () => {
+    const m = tiedMatch()
+    expect(m.phase).toBe('break')
+    expect(m.result).toBeNull()
+    const so = m.innings[2]
+    expect(so.superOver).toBe(1)
+    expect(so.batting).toBe('B')
+    expect(so.target).toBeNull()
+    expect(inningsOvers(m.settings.overs, so)).toBe(1)
+    expect(inningsWickets(m, so)).toBe(2) // two wickets, not the match's three
+  })
+
+  it('the super over is one over and two wickets, and decides the match', () => {
+    let m = resume(tiedMatch())
+    m = scoreAndOut(m, 6) // B: 6/2
+    expect(m.phase).toBe('break')
+    expect(m.innings[3]).toMatchObject({ superOver: 1, batting: 'A', target: 7 })
+    m = resume(m)
+    for (let i = 0; i < 6; i++) m = applyBall(m, { ...dot, runs: i === 0 ? 1 : 0 }) // A: 1 off the over
+    expect(m.phase).toBe('done')
+    expect(m.result?.winner).toBe('B')
+    expect(m.result?.text).toBe(`${m.settings.teamNames.B} won the super over`)
+  })
+
+  it('a tied super over leads to another, up to three, then the match is tied', () => {
+    let m = tiedMatch()
+    for (let n = 1; n <= 3; n++) {
+      expect(m.innings[m.current].superOver).toBe(n)
+      m = scoreAndOut(resume(m), 5)
+      m = scoreAndOut(resume(m), 5)
+      if (n < 3) {
+        expect(m.phase).toBe('break')
+        // the side that batted second in the last super over bats first in the next
+        expect(m.innings[m.current].batting).toBe(m.innings[m.current - 1].batting)
+      }
+    }
+    expect(m.phase).toBe('done')
+    expect(m.result?.winner).toBeNull()
+    expect(m.innings.length).toBe(2 + 2 * MAX_SUPER_OVERS)
+  })
+
+  it('a chase reaching the target wins the super over straight away', () => {
+    let m = scoreAndOut(resume(tiedMatch()), 4)
+    m = resume(m)
+    m = applyBall(m, { ...dot, runs: 6, boundary: 6 })
+    expect(m.phase).toBe('done')
+    expect(m.result?.winner).toBe('A')
+    expect(m.innings[3].balls).toBe(1)
+  })
+})
+
 describe('room', () => {
   beforeEach(() => vi.useFakeTimers())
   afterEach(() => vi.useRealTimers())
@@ -147,6 +216,27 @@ describe('room', () => {
     const { room } = makeRoom()
     expect(() => room.handle('host', { t: 'bowl', delivery: { type: 'nope' } as unknown as Delivery })).not.toThrow()
     expect(() => room.handle('host', null as unknown as never)).not.toThrow()
+  })
+
+  it('carries a tied match through super-over breaks to a result', () => {
+    // Bots play for both (disconnected) players until a 1-over match ends in a tie.
+    for (let attempt = 0; attempt < 400; attempt++) {
+      const { room, sent } = makeRoom()
+      room.join('p2', 'Two')
+      room.handle('host', { t: 'start' })
+      room.disconnect('host')
+      room.disconnect('p2')
+      for (let i = 0; i < 400 && room.match!.phase !== 'done'; i++) vi.advanceTimersByTime(5000)
+      const m = room.match!
+      expect(m.phase).toBe('done')
+      if (!m.innings.some((inn) => inn.superOver)) continue
+      // every super-over innings is at most one over, and the break was announced to clients
+      for (const inn of m.innings.filter((x) => x.superOver)) expect(inn.balls).toBeLessThanOrEqual(6)
+      expect(sent.some((s) => s.msg.t === 'match' && !!s.msg.match?.innings.some((inn) => inn.superOver) && s.msg.match?.phase === 'playing')).toBe(true)
+      expect(m.result).not.toBeNull()
+      return
+    }
+    throw new Error('no tied match in 400 bot games')
   })
 
   it('hands host to another player when the host leaves the lobby', () => {

@@ -32,6 +32,7 @@ Created by **[nick10-05](https://github.com/nick10-05)**.
 - Proper scoring: striker and non-striker, strike rotation, overs and ends, no consecutive overs for a bowler, bowling quotas, wides, no-balls with free hits, byes, leg byes.
 - Dismissals: bowled, caught, caught behind, LBW, stumped and run out.
 - Small teams: "last man stands" lets the final batter bat alone; a 1-player side bats on lives.
+- Tied match? A super over decides it: one over and two wickets each, repeated (up to three) if it is tied too.
 
 **3D presentation**
 - Floodlit stadium with tiered stands, an animated crowd (with Mexican waves), LED boards and a live big screen.

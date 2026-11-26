@@ -117,6 +117,8 @@ export interface BowlerStat {
 }
 
 export interface Innings {
+  /** Set on super-over innings: 1 for the first super over, 2 for a second if that was tied too. */
+  superOver?: number
   batting: TeamId
   runs: number
   wickets: number

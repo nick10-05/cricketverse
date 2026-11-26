@@ -31,8 +31,13 @@ export function defaultWickets(teamSize: number) {
   return teamSize - 1
 }
 
-function newInnings(batting: TeamId, size: number, target: number | null): Innings {
+/** Super overs: one over each, two wickets, repeated if tied (up to this many). */
+export const SUPER_OVER_WICKETS = 2
+export const MAX_SUPER_OVERS = 3
+
+function newInnings(batting: TeamId, size: number, target: number | null, superOver?: number): Innings {
   return {
+    ...(superOver ? { superOver } : {}),
     batting,
     runs: 0,
     wickets: 0,
@@ -84,6 +89,17 @@ export function createMatch(
 
 export function maxWickets(m: MatchState, batting: TeamId) {
   return m.maxWickets?.[batting] ?? m.settings.wickets
+}
+
+/** Overs in an innings: the match length, or one for a super over. */
+export function inningsOvers(overs: number, inn: Innings) {
+  return inn.superOver ? 1 : overs
+}
+
+/** Wickets that end an innings (at most two in a super over). */
+export function inningsWickets(m: MatchState, inn: Innings) {
+  const w = maxWickets(m, inn.batting)
+  return inn.superOver ? Math.min(SUPER_OVER_WICKETS, w) : w
 }
 
 export function currentInnings(m: MatchState) {
@@ -216,23 +232,15 @@ export function applyBall(prev: MatchState, o: BallOutcome): MatchState {
   }
 
   const overDone = legal && inn.balls % 6 === 0
-  const totalBalls = m.settings.overs * 6
-  const allOut = inn.wickets >= maxWickets(m, inn.batting)
+  const totalBalls = inningsOvers(m.settings.overs, inn) * 6
+  const allOut = inn.wickets >= inningsWickets(m, inn)
   const chased = inn.target !== null && inn.runs >= inn.target
   const oversUp = inn.balls >= totalBalls
 
   if (overDone) inn.overRuns.push(inn.runs)
   if (allOut || chased || oversUp) {
     if (!overDone) inn.overRuns.push(inn.runs)
-    if (m.current === 0) {
-      m.phase = 'break'
-      const chasing = other(inn.batting)
-      m.innings.push(newInnings(chasing, m.teams[chasing].length, inn.runs + 1))
-      m.current = 1
-    } else {
-      m.phase = 'done'
-      m.result = decide(m)
-    }
+    endInnings(m)
   } else if (overDone) {
     // New over: change ends and hand the ball to the next bowler (never the same one twice running).
     if (inn.nonStriker >= 0) [inn.striker, inn.nonStriker] = [inn.nonStriker, inn.striker]
@@ -254,9 +262,51 @@ export function startSecondInnings(prev: MatchState): MatchState {
   return m
 }
 
-function decide(m: MatchState): { winner: TeamId | null; text: string } {
-  const [a, b] = m.innings
+/**
+ * The current innings is over. After a first innings the other side chases; after a chase the
+ * pair is decided, and a tie goes to a super over (the side that batted second bats first).
+ */
+function endInnings(m: MatchState) {
+  const inn = currentInnings(m)
+  const add = (batting: TeamId, target: number | null, superOver?: number) => {
+    m.phase = 'break'
+    m.innings.push(newInnings(batting, m.teams[batting].length, target, superOver))
+    m.current = m.innings.length - 1
+  }
+  if (inn.target === null) {
+    add(other(inn.batting), inn.runs + 1, inn.superOver)
+    return
+  }
+  const result = decide(m)
+  if (result) {
+    m.phase = 'done'
+    m.result = result
+    return
+  }
+  const next = (inn.superOver ?? 0) + 1
+  if (next > MAX_SUPER_OVERS) {
+    m.phase = 'done'
+    m.result = { winner: null, text: 'Match tied! (the super overs were tied too)' }
+    return
+  }
+  add(inn.batting, null, next)
+}
+
+/** True while the match is in (or heading into) a super over. */
+export function inSuperOver(m: MatchState) {
+  return !!currentInnings(m)?.superOver
+}
+
+/** Result of the pair of innings just finished, or null if it is tied and play goes on. */
+function decide(m: MatchState): { winner: TeamId | null; text: string } | null {
+  const b = m.innings[m.current]
+  const a = m.innings[m.current - 1]
   const nameOf = (t: TeamId) => m.settings.teamNames[t]
+  if (b.superOver) {
+    if (b.runs === a.runs) return null
+    const winner = b.runs > a.runs ? b.batting : a.batting
+    return { winner, text: `${nameOf(winner)} won the ${b.superOver > 1 ? `${ordinal(b.superOver)} ` : ''}super over` }
+  }
   if (b.runs >= (b.target ?? Infinity)) {
     const left = maxWickets(m, b.batting) - b.wickets
     const ballsLeft = m.settings.overs * 6 - b.balls
@@ -265,15 +315,19 @@ function decide(m: MatchState): { winner: TeamId | null; text: string } {
       text: `${nameOf(b.batting)} won by ${left} wicket${left === 1 ? '' : 's'} (${ballsLeft} ball${ballsLeft === 1 ? '' : 's'} left)`,
     }
   }
-  if (b.runs === a.runs) return { winner: null, text: 'Match tied!' }
+  if (b.runs === a.runs) return null
   const margin = a.runs - b.runs
   return { winner: a.batting, text: `${nameOf(a.batting)} won by ${margin} run${margin === 1 ? '' : 's'}` }
+}
+
+function ordinal(n: number) {
+  return n === 2 ? '2nd' : n === 3 ? '3rd' : `${n}th`
 }
 
 export function requiredRate(inn: Innings, overs: number) {
   if (inn.target === null) return null
   const need = inn.target - inn.runs
-  const balls = overs * 6 - inn.balls
+  const balls = inningsOvers(overs, inn) * 6 - inn.balls
   if (balls <= 0) return null
   return { need, balls, rate: (need / balls) * 6 }
 }

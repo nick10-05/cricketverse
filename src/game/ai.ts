@@ -1,5 +1,5 @@
 import { randomSeed, trajectory, timingWindows } from './physics'
-import { currentInnings, requiredRate } from './rules'
+import { currentInnings, inningsOvers, requiredRate } from './rules'
 import type { Delivery, DeliveryType, FieldSetting, MatchState, ShotInput } from './types'
 
 const PACE: DeliveryType[] = ['fast', 'fast', 'swing', 'seam', 'yorker', 'bouncer', 'slower']
@@ -9,7 +9,7 @@ const SPIN: DeliveryType[] = ['spin', 'spin', 'spin', 'slower', 'yorker']
 export function botField(m?: MatchState | null): FieldSetting {
   if (!m) return 'balanced'
   const inn = currentInnings(m)
-  const total = m.settings.overs * 6
+  const total = inningsOvers(m.settings.overs, inn) * 6
   const left = total - inn.balls
   if (inn.target !== null) {
     const rr = requiredRate(inn, m.settings.overs)
