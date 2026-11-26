@@ -90,6 +90,7 @@ A few details that make this work:
 - **Seeded, deterministic physics.** A delivery carries a random `seed`. [physics.ts](../src/game/physics.ts) uses a seeded random generator, so the same delivery and shot always produce the same flight, bounce and result. Only a few bytes cross the network; every screen draws the same ball.
 - **Timing is measured locally.** The striker's timing is measured on their own device against their own animation, then sent as a number. Network lag changes *when* the shot arrives, not *how good* it was, so a laggy connection doesn't ruin your batting.
 - **The room waits for the animation.** After a ball, `ballAnimationMs` estimates how long clients need to show the run-up, flight, result and any slow-motion replay. Bots don't bowl the next ball until that time has passed.
+- **Breaks are just another phase.** At the end of an innings `applyBall` sets `phase: 'break'` and pushes the next innings. The room waits for the animation plus a few seconds, then resumes play. A tie goes to a super over the same way (a one-over innings each, repeated up to three times if tied again), so no extra networking code is needed for it.
 - **Stale messages are ignored.** Every ball has a `ballId`. A `shot` for an old ball, or from someone who isn't the striker, is dropped.
 
 ## Turns, bots and timeouts
