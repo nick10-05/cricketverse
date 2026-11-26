@@ -8,6 +8,7 @@ import {
   trajectory,
   type Trajectory,
   SWING_TIME,
+  bowlStyle,
 } from '../game/physics'
 import type { BallOutcome, Delivery, PathPoint, ShotInput, TeamId } from '../game/types'
 import { Camera, lerp, lerpV, type V3 } from './camera'
@@ -17,7 +18,6 @@ export const TEAM_COLORS: Record<TeamId, { main: string; dark: string; light: st
   B: { main: '#1aa7ff', dark: '#075a9c', light: '#8fd8ff' },
 }
 
-const RUNUP = 1.15 // seconds
 const BAT_CAM = { pos: { x: 1.3, y: 3.9, z: 8.6 }, target: { x: -0.4, y: 0.4, z: -12 }, zoom: 1.6 }
 const BATTER = { x: -0.42, z: -1.0 }
 
@@ -156,7 +156,7 @@ export class Scene {
   /** Seconds since release for the current play (negative during the run-up). */
   flightTime(now = performance.now()) {
     if (!this.play) return -99
-    return (now - this.play.start) / 1000 - RUNUP
+    return (now - this.play.start) / 1000 - bowlStyle(this.play.d.type).runup
   }
 
   /** Live batting: register a swing now and return the full shot input. */
@@ -326,7 +326,8 @@ export class Scene {
     if (p) {
       const tr = p.tr
       if (t < 0) {
-        const u = (t + RUNUP) / RUNUP
+        const ru = bowlStyle(p.d.type).runup
+        const u = (t + ru) / ru
         bowlerZ = lerp(-33, -20.6, Math.min(1, u))
         bowlerRun = u * 9
       } else {

@@ -3,31 +3,37 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
-import { CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, SWING_TIME, trajectory, type Fielder, type Trajectory } from '../game/physics'
+import { bowlStyle, CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, SWING_TIME, trajectory, type Fielder, type Trajectory } from '../game/physics'
 import type { BallOutcome, Delivery, FieldSetting, PathPoint, ShotInput, ShotType, TeamId } from '../game/types'
 import type { PlayOptions } from '../render/scene'
 import { TEAM_COLORS } from '../render/scene'
 import { buildStadium, type Stadium } from './stadium'
 import { ballTexture, blobTexture, glowTexture, shade } from './textures'
 import {
-  bowlPose,
+  APPEAL,
+  bowlAction,
+  CATCH_CHEST,
   CATCH_HIGH,
+  cheerPose,
   Cricketer,
   divePose,
+  getUpPose,
+  HANDS_ON_HEAD,
   IDLE,
   KEEPER_CROUCH,
   lerpPose,
+  PICKUP,
   READY,
   runPose,
   throwPose,
   umpirePose,
+  walkPose,
   type Kit,
   type Pose,
 } from './cricketer'
 
 export type Quality = 'high' | 'medium' | 'low'
 
-const RUNUP = 1.15
 const BATTER = { x: -0.42, z: -0.8 }
 const NONSTRIKER = { x: -1.05, z: -PITCH_LEN - 0.4 }
 const BAT_CAM = { pos: new THREE.Vector3(1.3, 3.9, 8.6), target: new THREE.Vector3(-0.4, 0.4, -12), zoom: 1.6 }
@@ -177,6 +183,9 @@ export class Scene3D {
   private fielders: Cricketer[] = []
   private umpires: Cricketer[] = []
   private fieldPos: THREE.Vector3[] = []
+  /** How far the fielders have walked in with the bowler (metres). */
+  private walkIn = 0
+  private actorsReplay = false
 
   // props
   private ball: THREE.Mesh
@@ -350,7 +359,7 @@ export class Scene3D {
   private loop = () => {
     this.raf = requestAnimationFrame(this.loop)
     const now = performance.now()
-    const dt = Math.min(0.05, (now - this.last) / 1000)
+    const dt = Math.max(0, Math.min(0.05, (now - this.last) / 1000))
     this.last = now
     this.clock += dt
     this.frame(now, dt)
@@ -386,7 +395,7 @@ export class Scene3D {
 
   flightTime(now = performance.now()) {
     if (!this.play) return -99
-    return (now - this.play.start) / 1000 - RUNUP
+    return (now - this.play.start) / 1000 - bowlStyle(this.play.d.type).runup
   }
 
   swing(dir: number, loft: boolean, now = performance.now()): ShotInput | null {
@@ -573,6 +582,11 @@ export class Scene3D {
     let viewT = realT
     if (p?.replay) viewT = p.replay.from + ((now - p.replay.startReal) / 1000) * REPLAY_SPEED
 
+    // a camera cut into or out of the replay: bodies jump to the new moment instead of blending
+    if (!!p?.replay !== this.actorsReplay) {
+      this.actorsReplay = !!p?.replay
+      for (const a of [this.striker, this.nonStriker, this.bowler, this.keeper, ...this.fielders, ...this.umpires]) a.cut()
+    }
     this.updateWorld(p, viewT, dt, !!p?.replay)
     this.updateCamera(p, viewT, dt, !!p?.replay, r.width, r.height)
     this.updateParticles(dt)
@@ -659,7 +673,11 @@ export class Scene3D {
           if (hitT < 0.25) ball.addScaledVector(v(tr.pos(th)).sub(v(o.path[0])), 1 - smooth(hitT / 0.25))
         }
         else if (o.throwPath.length && hitT >= o.throwPath[0].t) ball = interp(o.throwPath, hitT)
-        else if (o.wicket === 'caught' || o.wicket === 'caught behind') {
+        else if (o.throwPath.length && o.fielder >= 1 && hitT > pEnd + 0.06) {
+          // picked up: in the fielder's hand until the throw
+          const f = o.fielder === 1 ? this.bowler : this.fielders[o.fielder - 2]
+          ball = f ? f.handWorld('r') : interp(o.path, pEnd)
+        } else if (o.wicket === 'caught' || o.wicket === 'caught behind') {
           const f = o.fielder === 0 ? this.keeper : o.fielder === 1 ? this.bowler : this.fielders[o.fielder - 2]
           ball = f ? f.handWorld('r') : interp(o.path, pEnd)
         } else ball = interp(o.path, pEnd)
@@ -685,35 +703,76 @@ export class Scene3D {
     const bw = this.bowler
     const releaseX = p ? 0.35 * p.d.turn * (p.d.type === 'spin' ? 0.4 : 1) : 0.35
     const bx = releaseX + 0.28
+    const relZ = -20.6
+    const reacting = !!(p && o && p.resultFired && !replay && p.resultAt !== null)
+    const since = reacting ? t - p!.resultAt! : 0
     if (!p) {
-      bw.root.position.set(bx, 0, -33)
-      bw.root.rotation.y = 0
-      bw.setPose(lerpPose(IDLE, { spine: [0.05, 0, 0] }, 0.5))
+      // between balls: walk back to the mark, then turn round and wait
+      const mark = bw.memo.mark ?? -29
+      const pos = bw.root.position
+      if (pos.z > mark + 0.1) {
+        pos.z = Math.max(mark, pos.z - dt * 3.4)
+        pos.x += (0.63 - pos.x) * Math.min(1, dt * 1.2)
+        bw.faceYaw(Math.PI, dt, 5)
+        bw.animate('walkback', walkPose(bw.stride(dt, 0.8).phase), dt, 0.4)
+      } else {
+        pos.z = mark
+        bw.faceYaw(0, dt, 4)
+        bw.stride(dt)
+        bw.animate('wait', lerpPose(IDLE, { spine: [0.05, 0, 0] }, 0.5), dt, 0.45)
+      }
       bw.heldBall!.visible = true
     } else if (t < 0) {
-      const u = (t + RUNUP) / RUNUP
-      const z = THREE.MathUtils.lerp(-33, -20.6, Math.min(1, u))
-      bw.root.position.set(bx, 0, z)
-      bw.root.rotation.y = 0
-      const run = runPose(t * 15, 0.9)
-      bw.setPose(t > -0.32 ? lerpPose(run, bowlPose(t), smooth((t + 0.32) / 0.12)) : run)
+      const st = bowlStyle(p.d.type)
+      if (bw.memo.play !== p.start) {
+        bw.memo.play = p.start
+        bw.memo.mark = st.mark
+        bw.memo.dz = clamp(bw.root.position.z - st.mark, -6, 6)
+        bw.memo.dx = bw.root.position.x - bx
+      }
+      const zG = relZ - st.bound - st.step
+      const appT = st.runup - st.gather
+      let z: number
+      let x = bx
+      if (t < -st.gather) {
+        // the approach builds speed all the way to the crease
+        const u = clamp((t + st.runup) / appT, 0, 1)
+        const fix = 1 - smooth(u / 0.6)
+        z = THREE.MathUtils.lerp(st.mark, zG, Math.pow(u, 1.5)) + bw.memo.dz * fix
+        x = bx + bw.memo.dx * fix
+      } else {
+        const g = (t + st.gather) / st.gather
+        z = zG + (relZ - zG) * g * (1.25 - 0.25 * g)
+      }
+      bw.root.position.set(x, 0, z)
+      bw.faceYaw(0, dt, 8)
+      const s = bw.stride(dt, st.stepLen)
+      if (t < -st.gather - 0.04) bw.animate('runup', runPose(s.phase, Math.max(0.55, s.effort)), dt, 0.3)
+      else bw.animate('deliver', bowlAction(t, st.gather, st.k), dt, 0.08)
       bw.heldBall!.visible = true
     } else {
+      const st = bowlStyle(p.d.type)
       bw.heldBall!.visible = false
-      const ft = Math.min(t, 1.2)
-      const z = -20.6 + 3.6 * (1 - Math.pow(1 - ft / 1.2, 2))
-      bw.root.position.set(bx + ft * 0.4, 0, z)
+      const ft = Math.min(t, 1.4)
+      const fe = 1 - Math.pow(1 - ft / 1.4, 2)
+      // follow through, peeling away off the pitch
+      bw.root.position.set(bx + 1.5 * fe * (0.4 + 0.6 * st.k), 0, relZ + st.follow * fe)
       const fielderIdx = o?.fielder ?? -1
-      if (hitT !== null && fielderIdx === 1 && o) this.animateChaser(bw, o, hitT, pEnd, new THREE.Vector3(bx + 0.5, 0, -17))
-      else if (t < 0.45) bw.setPose(bowlPose(t))
-      else if (t < 1.2) bw.setPose(lerpPose(runPose(t * 12, 1.1 - t), READY, smooth((t - 0.8) / 0.4)))
-      else bw.setPose(READY)
-      if (hitT === null || fielderIdx !== 1) bw.root.rotation.y = hitT !== null ? yawTo(ball.x - bw.root.position.x, ball.z - bw.root.position.z) : 0
+      const s = bw.stride(dt, st.stepLen)
+      if (hitT !== null && fielderIdx === 1 && o && !reacting) this.animateChaser(bw, o, hitT, pEnd, new THREE.Vector3(bx + 0.5, 0, -17), dt)
+      else {
+        if (reacting && o!.wicket) bw.animate(since < 0.9 ? 'appeal' : 'cheer', since < 0.9 ? APPEAL : cheerPose(this.clock, 1), dt, 0.18)
+        else if (reacting && o!.boundary) bw.animate('gutted', HANDS_ON_HEAD, dt, 0.3)
+        else if (t < 0.42) bw.animate('deliver', bowlAction(t, st.gather, st.k), dt, 0.08)
+        else if (t < 1.35) bw.animate('followrun', runPose(s.phase, s.effort), dt, 0.15)
+        else bw.animate('ready', READY, dt, 0.35)
+        bw.faceYaw(hitT !== null ? yawTo(ball.x - bw.root.position.x, ball.z - bw.root.position.z) : reacting && o!.wicket ? -0.5 : 0, dt, 7)
+      }
     }
     if (p && t < 0) ball = bw.handWorld('r')
 
     // ---- striker
-    this.animateStriker(p, t, hitT, pEnd)
+    this.animateStriker(p, t, hitT, pEnd, dt)
 
     // ---- non-striker: backs up, then runs
     const ns = this.nonStriker
@@ -721,12 +780,14 @@ export class Scene3D {
     const runs = o && !o.boundary && !o.wicket && o.extra !== 'wide' ? (o.extra === 'noball' ? o.runs - 1 : o.runs) : o?.wicket === 'run out' ? Math.max(1, o.runs) : 0
     const runDur = clamp((pEnd + 1.4) / Math.max(1, runs), 1.3, 2.4)
     if (hitT !== null && runs > 0) {
-      this.animateRunner(ns, hitT, runs, runDur, -1, 0.75)
+      this.animateRunner(ns, hitT, runs, runDur, -1, 0.75, dt)
     } else {
       const backing = p && t > -0.3 ? Math.min(1.4, (t + 0.3) * 1.6) : 0
       ns.root.position.set(NONSTRIKER.x, 0, NONSTRIKER.z + backing)
-      ns.root.rotation.y = 0
-      ns.setPose(backing > 0.05 && backing < 1.4 ? runPose(t * 9, 0.25) : IDLE)
+      ns.faceYaw(0, dt, 8)
+      const s = ns.stride(dt, 0.8)
+      if (backing > 0.05 && backing < 1.4) ns.animate('backup', walkPose(s.phase), dt, 0.2)
+      else ns.animate('idle', IDLE, dt, 0.4)
       ns.holdBat(new THREE.Vector3(-0.15, 0.8, 0.22), new THREE.Vector3(0.1, -1, 0.35), new THREE.Vector3(0, 0, 1))
     }
 
@@ -735,21 +796,29 @@ export class Scene3D {
     kp.root.rotation.y = Math.PI
     kp.root.position.set(0, 0, 3.2)
     if (hitT !== null && o?.fielder === 0 && o.wicket === 'caught behind') {
-      kp.setPose(lerpPose(KEEPER_CROUCH, CATCH_HIGH, smooth(hitT / 0.3)))
+      kp.animate('catch', lerpPose(KEEPER_CROUCH, CATCH_HIGH, smooth(hitT / 0.3)), dt, 0.06)
       kp.root.position.x = THREE.MathUtils.lerp(0, o.path.at(-1)!.x, smooth(hitT / 0.3))
     } else if (p && tr && t > tr.tBounce && hitT === null) {
       const u = smooth((t - tr.tBounce) / 0.35)
-      kp.setPose(lerpPose(KEEPER_CROUCH, lerpPose(READY, CATCH_HIGH, 0.4), u))
+      kp.animate('take', lerpPose(KEEPER_CROUCH, lerpPose(READY, CATCH_HIGH, 0.4), u), dt, 0.06)
       kp.root.position.x = THREE.MathUtils.lerp(0, clamp(ball.x, -1, 1), u)
     } else if (hitT !== null) {
       // after a hit, the keeper runs up to the stumps for the return
       const u = smooth(hitT / 1.2)
       kp.root.position.set(0.3, 0, THREE.MathUtils.lerp(3.2, 1.3, u))
-      kp.setPose(lerpPose(KEEPER_CROUCH, READY, u))
-    } else kp.setPose(KEEPER_CROUCH)
+      kp.animate('up', lerpPose(KEEPER_CROUCH, READY, u), dt, 0.1)
+    } else if (p && tr && t > -0.5) {
+      // rises slightly out of the crouch as the bowler lets go
+      kp.animate('crouch', lerpPose(KEEPER_CROUCH, READY, 0.18 * smooth((t + 0.5) / 0.5)), dt, 0.3)
+    } else kp.animate('crouch', KEEPER_CROUCH, dt, 0.3)
+    if (reacting && o!.wicket && hitT === null) kp.animate('cheer', cheerPose(this.clock, 2), dt, 0.25)
 
     // ---- fielders (indices 2..10 of the field)
-    const walkIn = p ? smooth((t + RUNUP) / (RUNUP + 0.3)) * 1.8 : 0
+    const runupT = p ? bowlStyle(p.d.type).runup : 1.2
+    const walkTarget = p ? smooth((t + runupT) / (runupT + 0.3)) * 1.8 : 0
+    // walking in with the bowler, and back out between balls (never a jump)
+    this.walkIn += clamp(walkTarget - this.walkIn, -dt * 1.1, dt * 1.6)
+    if (replay) this.walkIn = walkTarget
     for (let i = 2; i < 11; i++) {
       const f = this.fielders[i - 2]
       const base = field[i]
@@ -759,29 +828,31 @@ export class Scene3D {
       fp.z += (base.z - fp.z) * Math.min(1, dt * 1.5)
       this.fieldPos[i] = fp
       const toBat = new THREE.Vector3(-fp.x, 0, -1 - fp.z).normalize()
-      const home = fp.clone().addScaledVector(toBat, walkIn)
+      const home = fp.clone().addScaledVector(toBat, this.walkIn)
       if (hitT !== null && o && i === o.fielder) {
-        this.animateChaser(f, o, hitT, pEnd, home)
+        this.animateChaser(f, o, hitT, pEnd, home, dt)
       } else if (hitT !== null && o) {
         // back up: drift a few metres toward the ball
         const d = new THREE.Vector3(ball.x - home.x, 0, ball.z - home.z)
         const dist = d.length() || 1
         const move = Math.min(Math.max(0, hitT - 0.3) * 2.5, 5, dist * 0.3)
         f.root.position.copy(home).addScaledVector(d.normalize(), move)
-        f.root.rotation.y = yawTo(ball.x - f.root.position.x, ball.z - f.root.position.z)
-        f.setPose(move > 0.1 && hitT < pEnd + 0.4 ? runPose(hitT * 11, 0.8) : READY)
+        f.faceYaw(yawTo(ball.x - f.root.position.x, ball.z - f.root.position.z), dt, 8)
+        const s = f.stride(dt, 1.2)
+        f.animate(s.effort > 0.18 && hitT < pEnd + 0.4 ? 'jog' : 'ready', s.effort > 0.18 && hitT < pEnd + 0.4 ? runPose(s.phase, s.effort) : READY, dt, 0.25)
       } else {
         f.root.position.copy(home)
-        f.root.rotation.y = yawTo(-home.x, -1 - home.z)
-        const moving = p && t < 0.1 && walkIn < 1.75
-        f.setPose(moving ? runPose(t * 8, 0.25) : p ? READY : IDLE)
+        f.faceYaw(yawTo(-home.x, -1 - home.z), dt, 5)
+        const s = f.stride(dt, 0.8)
+        if (f.speed > 0.35) f.animate('walk', walkPose(s.phase), dt, 0.3)
+        else f.animate(p ? 'ready' : 'idle', p ? READY : IDLE, dt, 0.4)
       }
-      // celebrate a wicket
-      if (o?.wicket && p?.resultFired && !replay) {
-        const j = Math.max(0, Math.sin((this.clock + i) * 7)) * 0.25
-        f.setPose(lerpPose(CATCH_HIGH, READY, 0.2))
-        f.root.position.y = j
-      } else f.root.position.y = 0
+      // celebrate a wicket together; the chaser is gutted by a boundary
+      if (reacting && o!.wicket) {
+        f.animate('cheer', cheerPose(this.clock, i * 1.7), dt, 0.25)
+        f.faceYaw(yawTo(-f.root.position.x, -10 - f.root.position.z), dt, 4)
+      } else if (reacting && o!.boundary && i === o!.fielder) f.animate('gutted', HANDS_ON_HEAD, dt, 0.35)
+      f.root.position.y = 0
     }
 
     // ---- umpires
@@ -794,9 +865,11 @@ export class Scene3D {
     if (o && p?.resultFired && !replay) {
       signal = o.boundary === 6 && !o.extra ? 'six' : o.boundary === 4 && !o.extra ? 'four' : o.wicket ? 'out' : o.extra === 'wide' ? 'wide' : o.extra === 'noball' ? 'noball' : o.extra === 'bye' || o.extra === 'legbye' ? 'bye' : 'none'
     }
-    u1.setPose(umpirePose(signal, this.clock))
-    u2.setPose(umpirePose('none', this.clock))
-    if (p && t < 0) u1.root.position.x = -0.9 // step aside for the bowler
+    u1.animate(signal, umpirePose(signal, this.clock), dt, 0.3)
+    u2.animate('none', umpirePose('none', this.clock), dt, 0.3)
+    // step aside for the bowler, back in once the ball is on its way
+    const aside = p ? 1 - smooth((t - 0.6) / 0.8) : 0
+    u1.root.position.x = -0.2 - 0.7 * (p && t < 0 ? 1 : aside)
 
     // ---- stumps
     for (let k = 0; k < this.stumps.length; k++) {
@@ -857,7 +930,7 @@ export class Scene3D {
     }
   }
 
-  private animateStriker(p: Play | null, t: number, hitT: number | null, pEnd: number) {
+  private animateStriker(p: Play | null, t: number, hitT: number | null, pEnd: number, dt: number) {
     const b = this.striker
     b.root.position.set(BATTER.x, 0, BATTER.z)
     b.root.rotation.y = Math.PI / 2
@@ -876,11 +949,11 @@ export class Scene3D {
     const runs = o && !o.boundary && !o.wicket && o.extra !== 'wide' ? (o.extra === 'noball' ? o.runs - 1 : o.runs) : o?.wicket === 'run out' ? Math.max(1, o.runs) : 0
     if (p && hitT !== null && runs > 0 && hitT > 0.45) {
       const runDur = clamp((pEnd + 1.4) / Math.max(1, runs), 1.3, 2.4)
-      this.animateRunner(b, hitT - 0.2, runs, runDur, 1, -0.75)
+      this.animateRunner(b, hitT - 0.2, runs, runDur, 1, -0.75, dt)
       return
     }
     if (!p) {
-      b.setPose(stance)
+      b.animate('stance', stance, dt, 0.4)
       const k = lerpK(STANCE, STANCE, 0)
       b.holdBat(k.g, k.d, new THREE.Vector3(1, 0, 0))
       return
@@ -954,56 +1027,101 @@ export class Scene3D {
     // Out: drop the bat a little and look down
     if (o?.wicket && p.resultFired && hitT === null) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0, 0] }, 0.7)
     if (o?.wicket && p.resultFired && o.path.length) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0.6, 0] }, 0.6)
-    b.setPose(pose)
-    b.holdBat(k.g, k.d, new THREE.Vector3(1, 0, 0.2))
+    // A boundary: raise the bat to the crowd
+    let face = new THREE.Vector3(1, 0, 0.2)
+    if (o?.boundary && !o.wicket && p.resultFired && !p.replay && p.resultAt !== null) {
+      const u = smooth((t - p.resultAt) / 0.45)
+      pose = lerpPose(pose, { spine: [-0.1, -0.6, 0], chest: [0, -0.4, 0], neck: [-0.35, 0.4, 0], lHip: [-0.1, 0, 0.1], rHip: [0.05, 0, -0.1], lKnee: [0.1, 0, 0], rKnee: [0.1, 0, 0] }, u)
+      k = { g: k.g.clone().lerp(new THREE.Vector3(0.05, 2.0, -0.25), u), d: k.d.clone().lerp(new THREE.Vector3(0.1, 1, -0.15), u).normalize() }
+      face = face.lerp(new THREE.Vector3(0, 0, -1), u)
+    }
+    b.animate('bat', pose, dt, 0.25)
+    b.holdBat(k.g, k.d, face)
   }
 
 
-  /** Run `runs` lengths between the creases. dir +1 = striker (starts at the striker's end). */
-  private animateRunner(r: Cricketer, t: number, runs: number, runDur: number, dir: 1 | -1, laneX: number) {
+  /**
+   * Run `runs` lengths between the creases. dir +1 = striker (starts at the striker's end).
+   * Each length speeds up out of the crease, slows into the far one with the bat grounded ahead,
+   * and the runner turns round rather than snapping.
+   */
+  private animateRunner(r: Cricketer, t: number, runs: number, runDur: number, dir: 1 | -1, laneX: number, dt: number) {
     const zA = BATTER.z
     const zB = -PITCH_LEN + 1.0
-    const leg = Math.min(runs, Math.floor(Math.max(0, t) / runDur))
-    const u = leg >= runs ? 1 : (Math.max(0, t) % runDur) / runDur
+    const tt = Math.max(0, t)
+    const leg = Math.min(runs, Math.floor(tt / runDur))
+    const u = leg >= runs ? 1 : (tt % runDur) / runDur
     const fromStriker = (leg % 2 === 0) === (dir === 1)
     const z0 = fromStriker ? zA : zB
     const z1 = fromStriker ? zB : zA
     const done = leg >= runs
     const endFromStriker = (runs % 2 === 0) === (dir === 1)
-    const z = done ? (endFromStriker ? zA : zB) : THREE.MathUtils.lerp(z0, z1, smooth(u * 1.1))
+    const zEnd = endFromStriker ? zA : zB
+    const z = done ? zEnd : THREE.MathUtils.lerp(z0, z1, smooth(Math.min(1, u * 1.08)))
     r.root.position.set(laneX, 0, z)
-    r.root.rotation.y = done ? (endFromStriker ? Math.PI : 0) : z1 < z0 ? Math.PI : 0
-    if (done) r.setPose(IDLE)
-    else r.setPose(runPose(t * 13, 1))
-    r.holdBat(new THREE.Vector3(-0.2, 0.9, 0.25), new THREE.Vector3(0.1, -0.6, 0.8).normalize(), new THREE.Vector3(1, 0, 0))
+    const s = r.stride(dt, 1.45)
+    // facing: toward the far crease, turning back once over the line
+    const heading = done ? (endFromStriker ? Math.PI : 0) : z1 < z0 ? Math.PI : 0
+    r.faceYaw(heading, dt, done ? 5 : 11)
+    const sinceDone = done ? tt - runs * runDur : 0
+    if (!done) r.animate('run', runPose(s.phase, Math.max(0.35, s.effort)), dt, 0.18)
+    else r.animate('idle', lerpPose(IDLE, { spine: [0.15, 0, 0] }, 1 - smooth(sinceDone / 0.8)), dt, 0.35)
+    // carry the bat, then reach it out along the ground into the crease
+    const ground = done ? 1 - smooth((sinceDone - 0.25) / 0.4) : smooth((u - 0.74) / 0.18)
+    const carryG = new THREE.Vector3(-0.2, 0.9, 0.25)
+    const carryD = new THREE.Vector3(0.1, -0.6, 0.8).normalize()
+    const reachG = new THREE.Vector3(-0.12, 0.62, 0.55)
+    const reachD = new THREE.Vector3(0.05, -0.9, 0.43).normalize()
+    r.holdBat(carryG.lerp(reachG, ground), carryD.lerp(reachD, ground).normalize(), new THREE.Vector3(1, 0, 0))
   }
 
-  /** Fielder going for the ball: run, dive or catch, then throw it in. */
-  private animateChaser(f: Cricketer, o: BallOutcome, hitT: number, pEnd: number, home: THREE.Vector3) {
+  /** Fielder going for the ball: run, dive or catch, then gather and throw it in. */
+  private animateChaser(f: Cricketer, o: BallOutcome, hitT: number, pEnd: number, home: THREE.Vector3, dt: number) {
     const fp = o.fielderPath
-    const at = fp.length ? interp(fp, Math.min(hitT, pEnd)) : home
+    const at = fp.length ? interp(fp, Math.min(hitT, pEnd)) : home.clone()
     if (hitT < 0.32) at.copy(home)
     const target = o.path.at(-1)!
     f.root.position.set(at.x, 0, at.z)
-    const moving = hitT < pEnd && hitT >= 0.32
-    if (moving) f.root.rotation.y = yawTo(target.x - home.x, target.z - home.z)
+    const s = f.stride(dt, 1.35)
     const caught = o.wicket === 'caught'
-    if (hitT < pEnd - 0.25) {
-      f.setPose(hitT < 0.32 ? READY : runPose(hitT * 13, 1))
+    const runHeading = yawTo(target.x - home.x, target.z - home.z)
+    if (hitT < 0.32) {
+      f.faceYaw(runHeading, dt, 10)
+      f.animate('ready', READY, dt, 0.15)
+    } else if (hitT < pEnd - 0.25) {
+      f.faceYaw(runHeading, dt, 10)
+      f.animate('chase', runPose(s.phase, Math.max(0.4, s.effort)), dt, 0.15)
     } else if (caught) {
       const u = smooth((hitT - (pEnd - 0.25)) / 0.25)
-      f.setPose(o.dive ? divePose(u) : lerpPose(READY, CATCH_HIGH, u))
-      if (o.dive) f.root.position.y = 0
-    } else {
-      // collect, then throw at the stumps
-      const throwStart = o.throwPath.length ? o.throwPath[0].t : pEnd + 0.5
-      if (o.dive && hitT < pEnd + 0.6) f.setPose(divePose(smooth((hitT - (pEnd - 0.25)) / 0.25)))
-      else if (hitT < throwStart - 0.35) f.setPose(lerpPose(READY, IDLE, 0.3))
+      f.faceYaw(runHeading, dt, 10)
+      if (o.dive) f.animate('dive', divePose(u), dt, 0.08)
       else {
-        const u = clamp((hitT - (throwStart - 0.35)) / 0.5, 0, 1)
+        const hands = target.y > 1.35 ? CATCH_HIGH : CATCH_CHEST
+        if (hitT < pEnd + 0.08) f.animate('catch', lerpPose(READY, hands, u), dt, 0.1)
+        // ...and pull it in to the chest
+        else f.animate('caught', lerpPose(hands, { ...CATCH_CHEST, spine: [0.4, 0, 0] }, smooth((hitT - pEnd - 0.08) / 0.3)), dt, 0.1)
+      }
+    } else if (o.boundary) {
+      // didn't get there: pull up at the rope
+      f.faceYaw(runHeading, dt, 6)
+      f.animate('pullup', READY, dt, 0.4)
+    } else {
+      // gather, then a crow hop and an overarm throw at the stumps
+      const throwStart = o.throwPath.length ? o.throwPath[0].t : pEnd + 0.5
+      const THROW = 0.55
+      const throwFrom = throwStart - THROW * 0.65 // release about two-thirds through the action
+      if (o.dive && hitT < pEnd + 0.45) {
+        f.faceYaw(runHeading, dt, 10)
+        f.animate('dive', divePose(smooth((hitT - (pEnd - 0.25)) / 0.25)), dt, 0.08)
+      } else if (o.dive && hitT < throwFrom) {
+        f.animate('getup', getUpPose((hitT - pEnd - 0.45) / Math.max(0.1, throwFrom - pEnd - 0.45)), dt, 0.1)
+      } else if (hitT < throwFrom) {
+        f.faceYaw(runHeading, dt, 10)
+        f.animate('pickup', PICKUP, dt, 0.14)
+      } else {
         const endP = o.throwPath.at(-1)
-        if (endP) f.root.rotation.y = yawTo(endP.x - at.x, endP.z - at.z)
-        f.setPose(throwPose(u))
+        if (endP) f.faceYaw(yawTo(endP.x - at.x, endP.z - at.z) + 0.5 * (1 - smooth((hitT - throwFrom) / (THROW * 0.5))), dt, 14)
+        f.animate('throw', throwPose(clamp((hitT - throwFrom) / THROW, 0, 1)), dt, 0.08)
       }
     }
   }

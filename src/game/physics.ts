@@ -15,6 +15,17 @@ export const RELEASE_Z = -19.2
 export const RELEASE_Y = 2.15
 export const FIELD_CENTER = { x: 0, z: -PITCH_LEN / 2 }
 export const BOUNDARY_R = 62
+
+/**
+ * How each kind of bowler comes in. `runup` is the seconds from the start of the run to release
+ * (the ball's flight clock starts at release, so this only changes what's on screen); `gather`
+ * covers the bound and delivery stride; `k` is the effort of the action.
+ */
+export function bowlStyle(type: DeliveryType) {
+  if (type === 'spin') return { runup: 1.15, gather: 0.3, mark: -24.6, bound: 1.0, step: 0.95, stepLen: 1.0, k: 0.45, follow: 1.8 }
+  if (type === 'swing' || type === 'seam' || type === 'slower') return { runup: 1.35, gather: 0.36, mark: -28.5, bound: 1.8, step: 1.3, stepLen: 1.3, k: 0.75, follow: 3.2 }
+  return { runup: 1.55, gather: 0.42, mark: -31.5, bound: 2.4, step: 1.5, stepLen: 1.5, k: 1, follow: 4.2 }
+}
 /**
  * Seconds from the batter's tap to bat meeting ball. The tap starts the swing, so a shot is
  * perfectly timed when the tap comes this long before the ball reaches the bat.

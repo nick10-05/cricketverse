@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 
 /**
  * Procedural, articulated cricketer. No external model files: every part is built from
@@ -134,6 +135,62 @@ function sphere(r: number, ws = 16, hs = 12) {
   return cached(`sph|${r}|${ws}|${hs}`, () => new THREE.SphereGeometry(r, ws, hs))
 }
 
+const smoothU = (u: number) => {
+  const x = Math.max(0, Math.min(1, u))
+  return x * x * (3 - 2 * x)
+}
+
+let vcToon: THREE.MeshToonMaterial | null = null
+let vcFlat: THREE.MeshBasicMaterial | null = null
+
+/** A part's geometry baked into its parent's space, with its colour as vertex colour. */
+function bakeGeometry(m: THREE.Mesh) {
+  m.updateMatrix()
+  const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone()
+  for (const k of Object.keys(g.attributes)) if (k !== 'position' && k !== 'normal') g.deleteAttribute(k)
+  g.applyMatrix4(m.matrix)
+  const c = (m.material as THREE.MeshBasicMaterial).color ?? new THREE.Color(1, 1, 1)
+  const n = g.attributes.position.count
+  const col = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    col[i * 3] = c.r
+    col[i * 3 + 1] = c.g
+    col[i * 3 + 2] = c.b
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+  return g
+}
+
+function mergeInto(node: THREE.Object3D, parts: THREE.Mesh[], outlined: boolean, shadows: boolean) {
+  const toon: THREE.BufferGeometry[] = []
+  const flatG: THREE.BufferGeometry[] = []
+  const line: THREE.BufferGeometry[] = []
+  let cast = false
+  for (const m of parts) {
+    const g = bakeGeometry(m)
+    if (m.material instanceof THREE.MeshBasicMaterial) flatG.push(g)
+    else toon.push(g)
+    if (m.userData.line) line.push(g)
+    cast = cast || m.castShadow
+    node.remove(m)
+  }
+  vcToon ??= new THREE.MeshToonMaterial({ vertexColors: true, gradientMap: ramp() })
+  vcFlat ??= new THREE.MeshBasicMaterial({ vertexColors: true })
+  const add = (gs: THREE.BufferGeometry[], material: THREE.Material, castShadow: boolean) => {
+    if (!gs.length) return
+    const merged = mergeGeometries(gs, false)
+    if (!merged) return
+    const mesh = new THREE.Mesh(merged, material)
+    mesh.castShadow = castShadow
+    mesh.userData.own = true
+    node.add(mesh)
+  }
+  add(toon, vcToon, shadows && cast)
+  add(flatG, vcFlat, false)
+  if (outlined) add(line, outline(), false)
+  for (const g of [...toon, ...flatG]) g.dispose()
+}
+
 const tmpV = new THREE.Vector3()
 const tmpQ = new THREE.Quaternion()
 const DOWN = new THREE.Vector3(0, -1, 0)
@@ -248,7 +305,7 @@ export class Cricketer {
     leg('r')
 
     if (opts.bat) {
-      this.bat = buildBat(shadows)
+      this.bat = buildBat(shadows, this.outlined)
       this.root.add(this.bat)
     }
     const ball = new THREE.Mesh(sphere(0.036, 10, 8), mat('#c3161e'))
@@ -256,14 +313,121 @@ export class Cricketer {
     ball.position.y = -0.06
     this.hands.r.add(ball)
     this.heldBall = ball
+    this.bake()
+  }
+
+  /**
+   * Merge every joint's parts into one vertex-coloured toon mesh (plus one unlit mesh for the
+   * face and one outline shell). ~45 parts per player become ~2 per joint: far fewer draw calls.
+   */
+  private bake() {
+    const groups = new Map<THREE.Object3D, THREE.Mesh[]>()
+    this.body.traverse((o) => {
+      const m = o as THREE.Mesh
+      if (!m.isMesh || m === this.heldBall || m.userData.own) return
+      const list = groups.get(m.parent!) ?? []
+      list.push(m)
+      groups.set(m.parent!, list)
+    })
+    for (const [node, parts] of groups) mergeInto(node, parts, this.outlined, this.shadows)
+  }
+
+  // ----------------------------------------------------------------------------- animation layer
+
+  private stateKey = ''
+  private fadeFrom: Pose | null = null
+  private fadeT = 0
+  private fadeDur = 0.2
+  private yaw = 0
+  private snapYaw = true
+  private phase = 0
+  private lastX = NaN
+  private lastZ = 0
+  /** Smoothed ground speed in m/s, measured from how far the root actually moved. */
+  speed = 0
+  /** Free per-actor state for the scene (celebration start points and so on). */
+  memo: Record<string, number> = {}
+
+  /**
+   * Play a pose for an animation state. Switching state cross-fades from wherever the body
+   * is right now, so moves blend instead of snapping; within a state the pose is exact.
+   */
+  animate(key: string, pose: Pose, dt: number, fade = 0.2) {
+    if (key !== this.stateKey) {
+      this.fadeFrom = this.stateKey ? this.snapshot() : null
+      this.stateKey = key
+      this.fadeT = 0
+      this.fadeDur = fade
+    }
+    this.fadeT += dt
+    if (this.fadeFrom && this.fadeT < this.fadeDur) this.setPose(lerpPose(this.fadeFrom, pose, smoothU(this.fadeT / this.fadeDur)))
+    else this.setPose(pose)
+  }
+
+  get state() {
+    return this.stateKey
+  }
+
+  /** Hard cut (camera cut into or out of a replay): next pose and heading apply instantly. */
+  cut() {
+    this.stateKey = ''
+    this.fadeFrom = null
+    this.snapYaw = true
+    this.lastX = NaN
+  }
+
+  private snapshot(): Pose {
+    const p: Pose = {}
+    for (const n of Object.keys(this.joints) as JointName[]) {
+      const r = this.joints[n].rotation
+      p[n] = [r.x, r.y, r.z]
+    }
+    p.offset = [this.body.position.x, this.body.position.y, this.body.position.z]
+    p.lean = [this.body.rotation.y, this.body.rotation.x, this.body.rotation.z]
+    return p
+  }
+
+  /** Turn smoothly toward a heading (radians) instead of snapping. */
+  faceYaw(target: number, dt: number, rate = 9) {
+    if (this.snapYaw) {
+      this.setYaw(target)
+      this.snapYaw = false
+      return
+    }
+    const d = Math.atan2(Math.sin(target - this.yaw), Math.cos(target - this.yaw))
+    this.yaw += d * (1 - Math.exp(-rate * dt))
+    this.root.rotation.y = this.yaw
+  }
+
+  setYaw(y: number) {
+    this.yaw = y
+    this.root.rotation.y = y
+  }
+
+  /**
+   * Advance the run cycle by the distance the root really moved, so feet plant instead of
+   * sliding. Returns the cycle phase (one step = PI) and a 0..1 effort for runPose.
+   */
+  stride(dt: number, stepLen = 1.3): { phase: number; effort: number } {
+    const x = this.root.position.x
+    const z = this.root.position.z
+    let d = 0
+    if (!Number.isNaN(this.lastX)) d = Math.min(0.5, Math.hypot(x - this.lastX, z - this.lastZ))
+    this.lastX = x
+    this.lastZ = z
+    const v = dt > 0 ? d / dt : 0
+    this.speed += (v - this.speed) * (1 - Math.exp(-10 * dt))
+    const effort = Math.min(1, Math.max(0.12, this.speed / 8))
+    this.phase += (d / (stepLen * (0.55 + 0.45 * effort))) * Math.PI
+    return { phase: this.phase, effort }
   }
 
   /** Add a mesh (and its outline shell) to a joint. */
   private part(g: THREE.BufferGeometry, m: THREE.Material, parent: THREE.Object3D, line = true, cast = true) {
     const x = new THREE.Mesh(g, m)
     x.castShadow = this.shadows && cast
+    x.userData.line = line
     parent.add(x)
-    if (line && this.outlined) x.add(new THREE.Mesh(g, outline()))
     return x
   }
 
@@ -423,10 +587,14 @@ export class Cricketer {
 
   dispose() {
     this.root.removeFromParent()
+    this.root.traverse((o) => {
+      const m = o as THREE.Mesh
+      if (m.isMesh && m.userData.own) m.geometry.dispose()
+    })
   }
 }
 
-function buildBat(shadows: boolean) {
+function buildBat(shadows: boolean, outlined = false) {
   const g = new THREE.Group()
   const willow = mat('#ecc98a')
   const blade = new THREE.Mesh(rbox(0.12, 0.58, 0.055, 0.02), willow)
@@ -445,6 +613,7 @@ function buildBat(shadows: boolean) {
   const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.021, 0.3, 10), mat('#d4262c'))
   handle.position.y = 0.15
   g.add(handle)
+  mergeInto(g, g.children.slice() as THREE.Mesh[], outlined, shadows)
   return g
 }
 
@@ -542,55 +711,173 @@ export function divePose(u: number): Pose {
   }
 }
 
-/** Overarm throw. u 0..1 */
+/** Smoothstep blended with linear: eases between keys without stopping dead on each one. */
+const easeKey = (u: number) => {
+  const x = Math.max(0, Math.min(1, u))
+  return 0.45 * x + 0.55 * x * x * (3 - 2 * x)
+}
+
+/** Sample a keyframed pose track at time t (keys sorted by time). */
+function track(keys: [number, Pose][], t: number): Pose {
+  if (t <= keys[0][0]) return keys[0][1]
+  for (let i = 1; i < keys.length; i++) {
+    const [t1, p1] = keys[i]
+    if (t <= t1) {
+      const [t0, p0] = keys[i - 1]
+      return lerpPose(p0, p1, easeKey((t - t0) / (t1 - t0)))
+    }
+  }
+  return keys[keys.length - 1][1]
+}
+
+/**
+ * Overarm throw with a crow hop. u 0..1: the hop and wind-up take the first 45%, then the arm
+ * comes over the top (shoulder X rises past straight up) and the body rotates through.
+ */
 export function throwPose(u: number): Pose {
-  const wind = Math.min(1, u / 0.45)
-  const fire = Math.max(0, (u - 0.45) / 0.55)
+  return track(
+    [
+      [0, { ...READY }],
+      [0.25, { spine: [0.1, 0.7, 0], lHip: [-0.7, 0, 0], lKnee: [0.6, 0, 0], rHip: [0.2, 0, 0], rKnee: [0.3, 0, 0], rShoulder: [1.2, 0, -0.35], rElbow: [-0.8, 0, 0], lShoulder: [-1.2, 0, 0.2], lElbow: [-0.4, 0, 0], offset: [0, 0.1, 0] }],
+      [0.45, { spine: [-0.05, 0.75, 0], lHip: [-0.5, 0, 0], lKnee: [0.2, 0, 0], rHip: [0.25, 0, 0], rKnee: [0.35, 0, 0], rShoulder: [2.6, 0, -0.35], rElbow: [-1.6, 0, 0], lShoulder: [-1.6, 0, 0.15], lElbow: [-0.2, 0, 0], neck: [0, -0.6, 0], offset: [0, -0.02, 0] }],
+      [0.62, { spine: [0.15, 0.1, 0], lHip: [-0.55, 0, 0], lKnee: [0.25, 0, 0], rHip: [0.35, 0, 0], rKnee: [0.5, 0, 0], rShoulder: [3.5, 0, -0.25], rElbow: [-0.7, 0, 0], lShoulder: [-0.6, 0, 0.25], lElbow: [-0.6, 0, 0], neck: [0, -0.1, 0], offset: [0, -0.06, 0] }],
+      [1, { spine: [0.5, -0.5, 0], lHip: [-0.6, 0, 0], lKnee: [0.4, 0, 0], rHip: [0.5, 0, 0], rKnee: [0.8, 0, 0], rShoulder: [4.7, 0, 0.1], rElbow: [-0.1, 0, 0], lShoulder: [0.4, 0, 0.3], lElbow: [-0.7, 0, 0], neck: [-0.2, 0.3, 0], offset: [0, -0.12, 0] }],
+    ],
+    u,
+  )
+}
+
+/**
+ * Bowling action around release (t = 0, seconds). The bowling arm turns one way only: from by
+ * the chin, down and back, up over the top to release just past vertical, then down across the
+ * body. `gather` is how long the bound and delivery stride take (pace bowlers leap longer);
+ * `k` is 0..1 effort (pace 1, spin ~0.45) and scales the leap, the lean and the follow-through.
+ */
+export function bowlAction(t: number, gather = 0.36, k = 1): Pose {
+  const s = gather / 0.36
+  const lean = 0.5 + 0.5 * k
+  return track(
+    [
+      [-0.36 * s, { spine: [0.15, 0, 0], rShoulder: [-0.6, 0, -0.2], rElbow: [-1.6, 0, 0], lShoulder: [-1.0, 0, 0.2], lElbow: [-1.4, 0, 0], lHip: [-0.4, 0, 0], lKnee: [0.6, 0, 0], rHip: [0.3, 0, 0], rKnee: [0.4, 0, 0], offset: [0, -0.04, 0] }],
+      // the bound: front knee high, hands up by the chin, body turning side-on
+      [-0.26 * s, { spine: [-0.05, 0.4, 0], rShoulder: [-1.2, 0, -0.3], rElbow: [-1.9, 0, 0], lShoulder: [-2.2, 0, 0.25], lElbow: [-0.9, 0, 0], lHip: [-1.25 * (0.6 + 0.4 * k), 0, 0], lKnee: [1.5 * (0.6 + 0.4 * k), 0, 0], rHip: [0.15, 0, 0], rKnee: [0.6, 0, 0], offset: [0, 0.16 * k, 0] }],
+      // back foot lands side-on: front arm reaching high, bowling arm swung down and back
+      [-0.17 * s, { spine: [-0.25 * lean, 0.7, 0], neck: [0, -0.7, 0], rShoulder: [0.7, 0, -0.25], rElbow: [-0.2, 0, 0], lShoulder: [-2.9, 0, 0.2], lElbow: [-0.15, 0, 0], lHip: [-0.9, 0, 0], lKnee: [0.5, 0, 0], rHip: [0.05, 0, 0], rKnee: [0.45, 0, 0], offset: [0, -0.05, 0] }],
+      // front foot braced, the arm rising behind
+      [-0.07 * s, { spine: [-0.15 * lean, 0.45, 0], neck: [0, -0.45, 0], rShoulder: [2.0, 0, -0.2], rElbow: [0, 0, 0], lShoulder: [-2.3, 0, 0.25], lElbow: [-0.2, 0, 0], lHip: [-0.55, 0, 0], lKnee: [0.12, 0, 0], rHip: [0.25, 0, 0], rKnee: [0.4, 0, 0], offset: [0, -0.03, 0] }],
+      // release, just past straight up
+      [0, { spine: [0.1, 0.05, 0], neck: [-0.1, -0.05, 0], rShoulder: [3.3, 0, -0.1], rElbow: [0, 0, 0], lShoulder: [-1.2, 0, 0.3], lElbow: [-0.6, 0, 0], lHip: [-0.6, 0, 0], lKnee: [0.1, 0, 0], rHip: [0.45, 0, 0], rKnee: [0.5, 0, 0], offset: [0, -0.04, 0] }],
+      // follow-through: arm down across the body, back leg coming through
+      [0.18, { spine: [0.6 * lean, -0.4, 0], neck: [-0.4, 0.2, 0], rShoulder: [4.9, 0, 0.35], rElbow: [-0.2, 0, 0], lShoulder: [0.3, 0, 0.35], lElbow: [-0.8, 0, 0], lHip: [-0.5, 0, 0], lKnee: [0.35, 0, 0], rHip: [0.1, 0, 0], rKnee: [1.1, 0, 0], offset: [0, -0.12 * lean, 0] }],
+      [0.42, { spine: [0.45 * lean, -0.3, 0], neck: [-0.3, 0.1, 0], rShoulder: [5.7, 0, 0.3], rElbow: [-0.5, 0, 0], lShoulder: [0.5, 0, 0.25], lElbow: [-1.0, 0, 0], lHip: [-0.7, 0, 0], lKnee: [0.6, 0, 0], rHip: [-0.4, 0, 0], rKnee: [0.8, 0, 0], offset: [0, -0.08, 0] }],
+    ],
+    t,
+  )
+}
+
+/** Walking cycle: short strides, arms swinging loose. */
+export function walkPose(phase: number): Pose {
+  const s = Math.sin(phase)
+  const c = Math.cos(phase)
   return {
-    spine: [0.2 * fire, 0.6 * (1 - fire) - 0.5 * fire, 0],
-    rShoulder: [2.8 * wind - 4.6 * fire, 0, -0.3],
-    rElbow: [-1.4 * wind + 1.2 * fire, 0, 0],
-    lShoulder: [-1.4 * wind + 1.0 * fire, 0, 0.3],
-    lElbow: [-0.5, 0, 0],
-    lHip: [-0.6 * wind, 0, 0],
-    rHip: [0.3, 0, 0],
-    lKnee: [0.3, 0, 0],
-    rKnee: [0.4 * fire, 0, 0],
+    lHip: [-0.4 * s, 0, 0.02],
+    rHip: [0.4 * s, 0, -0.02],
+    lKnee: [Math.max(0, -c) * 0.55 + 0.08, 0, 0],
+    rKnee: [Math.max(0, c) * 0.55 + 0.08, 0, 0],
+    lShoulder: [0.35 * s, 0, 0.08],
+    rShoulder: [-0.35 * s, 0, -0.08],
+    lElbow: [-0.3, 0, 0],
+    rElbow: [-0.3, 0, 0],
+    spine: [0.04, 0, 0],
+    offset: [0, Math.abs(s) * 0.025 - 0.01, 0],
   }
 }
 
-/** Bowling action around release (t=0). t in seconds relative to release. */
-export function bowlPose(t: number): Pose {
-  if (t < -0.32) return {}
-  if (t < 0) {
-    // gather + bound: arms up, front knee high, then the bowling arm windmills over the top
-    const u = (t + 0.32) / 0.32
-    return {
-      lShoulder: [-2.9 * Math.min(1, u * 1.6), 0, 0.2],
-      lElbow: [-0.2, 0, 0],
-      rShoulder: [1.4 - 3.4 * u, 0, -0.15],
-      rElbow: [-0.2 * (1 - u), 0, 0],
-      lHip: [-1.3 * Math.sin(u * Math.PI), 0, 0],
-      lKnee: [1.4 * Math.sin(u * Math.PI), 0, 0],
-      rHip: [0.25 * u, 0, 0],
-      spine: [-0.2 + 0.1 * u, 0.5 * (1 - u), 0],
-      offset: [0, 0.08 * Math.sin(u * Math.PI), 0],
-    }
-  }
-  // release and follow-through: arm sweeps down past the opposite hip, body folds over
-  const u = Math.min(1, t / 0.45)
+/** Bent right down, right hand at the ground to scoop the ball up. */
+export const PICKUP: Pose = {
+  spine: [1.05, 0, 0],
+  neck: [-0.7, 0, 0],
+  lHip: [-1.0, 0, 0.15],
+  rHip: [-0.15, 0, -0.1],
+  lKnee: [1.25, 0, 0],
+  rKnee: [0.7, 0, 0],
+  rShoulder: [-1.15, 0, -0.1],
+  rElbow: [-0.1, 0, 0],
+  lShoulder: [-0.6, 0, 0.3],
+  lElbow: [-0.5, 0, 0],
+  offset: [0, -0.28, 0],
+}
+
+/** Catch taken in front of the chest, hands cupped together. */
+export const CATCH_CHEST: Pose = {
+  spine: [0.25, 0, 0],
+  neck: [-0.3, 0, 0],
+  lShoulder: [-1.15, 0, -0.35],
+  rShoulder: [-1.15, 0, 0.35],
+  lElbow: [-1.1, 0, 0],
+  rElbow: [-1.1, 0, 0],
+  lHip: [-0.25, 0, 0.1],
+  rHip: [-0.25, 0, -0.1],
+  lKnee: [0.4, 0, 0],
+  rKnee: [0.4, 0, 0],
+  offset: [0, -0.06, 0],
+}
+
+/** Both arms punching the air, bouncing on the toes. time in seconds. */
+export function cheerPose(time: number, seed = 0): Pose {
+  const w = Math.sin(time * 8 + seed)
   return {
-    rShoulder: [-2.0 - 2.4 * u, 0, -0.15 + 0.5 * u],
-    rElbow: [0, 0, 0],
-    lShoulder: [-2.9 + 3.1 * u, 0, 0.2],
-    lElbow: [-0.3, 0, 0],
-    spine: [-0.1 + 0.75 * u, -0.5 * u, 0],
-    lHip: [-0.6 + 0.2 * u, 0, 0],
-    lKnee: [0.15, 0, 0],
-    rHip: [0.5 * u, 0, 0],
-    rKnee: [0.9 * u, 0, 0],
-    offset: [0, -0.08 * u, 0],
+    lShoulder: [-2.8 + 0.25 * w, 0, 0.35],
+    rShoulder: [-2.8 - 0.25 * w, 0, -0.35],
+    lElbow: [-0.45 - 0.3 * w, 0, 0],
+    rElbow: [-0.45 + 0.3 * w, 0, 0],
+    spine: [-0.12, 0, 0],
+    neck: [-0.35, 0, 0],
+    lKnee: [0.2 + 0.15 * Math.max(0, w), 0, 0],
+    rKnee: [0.2 + 0.15 * Math.max(0, w), 0, 0],
+    offset: [0, Math.max(0, w) * 0.12, 0],
   }
+}
+
+/** Bowler's appeal: arm up, leaning back, turned to the umpire. */
+export const APPEAL: Pose = {
+  spine: [-0.25, 0.3, 0],
+  neck: [-0.45, 0.3, 0],
+  rShoulder: [-2.95, 0, -0.3],
+  rElbow: [-0.1, 0, 0],
+  lShoulder: [-0.9, 0, 0.6],
+  lElbow: [-0.4, 0, 0],
+  lHip: [-0.3, 0, 0.12],
+  rHip: [0.2, 0, -0.12],
+  lKnee: [0.25, 0, 0],
+  rKnee: [0.3, 0, 0],
+}
+
+/** Hands on head: that went a long way. */
+export const HANDS_ON_HEAD: Pose = {
+  spine: [-0.08, 0, 0],
+  neck: [-0.25, 0, 0],
+  lShoulder: [-2.3, 0, 1.0],
+  rShoulder: [-2.3, 0, -1.0],
+  lElbow: [-2.3, 0, 0],
+  rElbow: [-2.3, 0, 0],
+}
+
+/** Clapping: hands meeting in front of the chest. time in seconds. */
+export function clapPose(time: number): Pose {
+  const c = 0.5 + 0.5 * Math.sin(time * 14)
+  return {
+    lShoulder: [-1.25, 0, -0.15 - 0.35 * c],
+    rShoulder: [-1.25, 0, 0.15 + 0.35 * c],
+    lElbow: [-1.0, 0, 0],
+    rElbow: [-1.0, 0, 0],
+    spine: [0.05, 0, 0],
+  }
+}
+
+/** Getting back up from a dive. u 0..1 */
+export function getUpPose(u: number): Pose {
+  return lerpPose(divePose(1), READY, easeKey(u))
 }
 
 /** Umpire signals. */
