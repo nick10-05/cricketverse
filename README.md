@@ -33,7 +33,7 @@ Created by **[nick10-05](https://github.com/nick10-05)**.
 - Practice offline against bots at any team size.
 
 **Real cricket**
-- Timing-based batting: drives, flicks, pulls, hooks, cuts, upper cuts, slogs, blocks and leaves, picked from the ball's line and length and the direction you choose. Loft it for sixes, at a risk.
+- Timing-based batting: drives, flicks, pulls, hooks, cuts, upper cuts, slogs, blocks and leaves, picked from the ball's line and length and the direction you choose. Switch to AIR to go for sixes, at the risk of being caught.
 - Bowling: pace, swing, seam, spin, yorker, bouncer and slower ball. Aim on the pitch and time the power meter.
 - Field placements: attacking (slips, short leg), balanced or defensive (sweepers on the rope).
 - Ball physics with drag, bounce, swing, seam and spin. Fielders chase, dive, catch and throw.
@@ -78,7 +78,7 @@ No `.env` file or API keys are needed. See [.env.example](.env.example) for the 
 
 | | |
 |---|---|
-| **Bat** | Watch the yellow ring where the ball pitches. Tap left, middle or right of the batter as the ball arrives, or swipe (swipe up to loft). Keyboard: ← ↑ →, hold Shift or press L to loft. |
+| **Bat** | Watch the yellow ring where the ball pitches. Tap left, middle or right of the batter as the ball arrives, or swipe (swipe up to hit in the air). The GROUND / AIR button picks safe ground shots or aerial shots that can go for six but can be caught. Keyboard: ← ↑ →, hold Shift or press L for AIR. |
 | **Timing** | Perfect timing middles it. Early pulls it to the leg side, late steers it to the off side. Way off and you miss. |
 | **Bowl** | Pick a delivery and a field, drag the target on the pitch, and stop the power meter in the green (Space). A rushed red-zone release can be a no-ball, and the next ball is a free hit. |
 

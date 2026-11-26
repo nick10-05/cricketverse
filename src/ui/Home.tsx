@@ -221,11 +221,11 @@ function Stats() {
 
 function HowTo() {
   const rows = [
-    ['🏏', 'Batting', 'Watch the yellow ring where the ball pitches. Tap/press the moment the ball reaches you. Tap left, middle or right of the batter to pick the direction. Turn on LOFT to go aerial: more sixes, more risk.'],
-    ['📱', 'Touch', 'Tap to hit, or swipe: the swipe direction aims the shot and swiping up lofts it. Tap during a replay to skip it.'],
+    ['🏏', 'Batting', 'Watch the yellow ring where the ball pitches. Tap/press the moment the ball reaches you. Tap left, middle or right of the batter to pick the direction. Switch GROUND to AIR to hit it high: more sixes, but you can be caught.'],
+    ['📱', 'Touch', 'Tap to hit, or swipe: the swipe direction aims the shot and swiping up hits it in the air. Tap during a replay to skip it.'],
     ['⏱️', 'Timing', 'PERFECT timing middles it. Early pulls it to the leg side, late steers it to the off side. Way off and you miss.'],
     ['🎯', 'Bowling', 'Pick a delivery (pace, swing, seam, spin, yorker, bouncer, slower) and a field (attack, balanced, defend), drag the target on the pitch, then stop the power meter in the green. A rushed red-zone release can be a no-ball, and the next ball is a free hit.'],
-    ['⌨️', 'Keyboard', 'Batting: ← ↑ → to hit, hold Shift (or L) to loft. Bowling: Space to bowl.'],
+    ['⌨️', 'Keyboard', 'Batting: ← ↑ → to hit, hold Shift (or press L) to switch between GROUND and AIR. Bowling: Space to bowl.'],
     ['👥', 'Rooms', 'Create a room, share the code, pick 1v1 up to 11v11 and 1–30 overs. Fill empty spots with bots. Lock the room so nobody can barge into a running match.'],
   ]
   return (

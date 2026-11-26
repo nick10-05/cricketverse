@@ -251,6 +251,26 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
     if (!canBowl) s.aim = null
   }, [canBowl])
 
+  // Tell the 3D camera how much of the screen the bowling panel covers, so the pitch stays in view.
+  const bowlPanelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const s = sceneRef.current
+    const el = bowlPanelRef.current
+    if (!(s instanceof Scene3D)) return
+    if (!canBowl || !el) {
+      s.bottomInset = 0
+      return
+    }
+    const update = () => (s.bottomInset = el.offsetHeight)
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      s.bottomInset = 0
+    }
+  }, [canBowl, quality])
+
   useEffect(() => {
     if (!canBowl) return
     let raf = 0
@@ -550,9 +570,9 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
       {/* Batting controls */}
       {iAmStriker && match.phase === 'playing' && (busy ? liveBatting : true) && !canBowl && (
-        <div className="absolute inset-x-0 bottom-0 z-20 p-3 pb-5 pointer-events-none">
+        <div className="absolute inset-x-0 bottom-0 z-20 p-2 pb-3 sm:p-3 sm:pb-5 pointer-events-none">
           {liveBatting && (
-            <div className="mx-auto max-w-xl grid grid-cols-3 text-center text-xs font-semibold tracking-widest text-white/55 mb-3">
+            <div className="mx-auto max-w-xl grid grid-cols-3 text-center text-[10px] sm:text-xs font-semibold tracking-widest text-white/55 mb-1.5 sm:mb-3">
               <div>◀ LEG SIDE</div>
               <div>STRAIGHT</div>
               <div>OFF SIDE ▶</div>
@@ -563,18 +583,21 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
               <TimingBar scene={getScene} />
             ) : (
               <div className="text-xs text-white/60 max-w-[55%] leading-snug bg-black/40 rounded-xl px-3 py-2">
-                Tap left · middle · right of the batter as the ball arrives, or swipe (swipe up to loft). Keys: ← ↑ →
+                Tap left · middle · right of the batter as the ball arrives, or swipe (swipe up to hit in the air). Keys: ← ↑ →
               </div>
             )}
             <button
-              className={`pointer-events-auto rounded-2xl px-5 py-3 font-display text-2xl tracking-widest border-2 transition ${loft ? 'bg-gold text-ink border-gold shadow-[0_0_24px_rgba(255,210,63,0.6)]' : 'bg-black/50 border-white/25 text-white/80'}`}
+              aria-pressed={loft}
+              title="Ground shots are safe; aerial shots can go for six but can be caught (key: L or Shift)"
+              className={`pointer-events-auto rounded-2xl px-4 py-2 font-display text-xl sm:text-2xl tracking-widest border-2 transition text-center ${loft ? 'bg-gold text-ink border-gold shadow-[0_0_24px_rgba(255,210,63,0.6)]' : 'bg-black/50 border-white/25 text-white/80'}`}
               onPointerDown={(e) => {
                 e.stopPropagation()
                 loftRef.current = !loftRef.current
                 setLoft(loftRef.current)
               }}
             >
-              LOFT {loft ? 'ON' : 'OFF'}
+              <span className="block leading-none">{loft ? 'AIR' : 'GROUND'}</span>
+              <span className="block text-[10px] font-sans font-semibold tracking-wider opacity-70 mt-1">{loft ? 'six or catch' : 'safe shot'}</span>
             </button>
           </div>
         </div>
@@ -582,46 +605,46 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
       {/* Bowling controls */}
       {canBowl && (
-        <div className="absolute inset-x-0 bottom-0 z-20 p-3 pb-4 animate-rise">
-          <div className="mx-auto max-w-xl rounded-3xl p-3 sm:p-4" style={{ background: 'rgba(7,11,26,0.85)', border: '1px solid rgba(255,255,255,0.1)' }}>
-            <div className="flex items-center justify-between mb-2">
-              <div className="font-display text-2xl tracking-wide">Your over · bowl</div>
-              <div className="text-xs text-white/55">Drag the red target on the pitch</div>
+        <div ref={bowlPanelRef} className="absolute inset-x-0 bottom-0 z-20 px-2 pb-2 sm:p-3 sm:pb-4 animate-rise">
+          <div className="mx-auto max-w-xl rounded-2xl sm:rounded-3xl p-2 sm:p-3 backdrop-blur-sm" style={{ background: 'rgba(7,11,26,0.6)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <div className="flex items-baseline justify-between mb-1.5 px-0.5">
+              <div className="font-display text-base sm:text-2xl tracking-wide">Your over · bowl</div>
+              <div className="text-[10px] sm:text-xs text-white/55">Drag the red target on the pitch</div>
             </div>
-            <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+            <div className="grid grid-cols-7 gap-1">
               {(Object.keys(DELIVERY_INFO) as DeliveryType[]).map((t) => (
                 <button
                   key={t}
                   onClick={() => setDtype(t)}
-                  className={`rounded-xl py-1.5 px-1 transition ${dtype === t ? 'bg-gold text-ink' : 'bg-white/5 text-white/80'}`}
+                  className={`rounded-lg py-1 px-0.5 transition min-w-0 ${dtype === t ? 'bg-gold text-ink' : 'bg-white/10 text-white/85'}`}
                 >
-                  <div className="text-[13px] font-bold leading-tight">{DELIVERY_INFO[t].label}</div>
-                  <div className="text-[10px] opacity-60">{Math.round(DELIVERY_INFO[t].speed * 3.6)} km/h</div>
+                  <div className="text-[10.5px] sm:text-[13px] font-bold leading-tight truncate">{DELIVERY_INFO[t].label}</div>
+                  <div className="text-[9px] sm:text-[10px] opacity-60 leading-tight">{Math.round(DELIVERY_INFO[t].speed * 3.6)}<span className="hidden sm:inline"> km/h</span></div>
                 </button>
               ))}
             </div>
-            {(dtype === 'swing' || dtype === 'spin' || dtype === 'seam') && (
-              <div className="flex gap-1.5 mt-2">
-                {([1, -1] as const).map((d) => (
-                  <button key={d} onClick={() => setTurnDir(d)} className={`flex-1 rounded-lg py-1 text-xs font-semibold ${turnDir === d ? 'bg-white text-ink' : 'bg-white/5 text-white/70'}`}>
-                    {dtype === 'swing' ? (d === 1 ? 'Out-swing →' : '← In-swing') : dtype === 'seam' ? (d === 1 ? 'Seam away →' : '← Seam in') : d === 1 ? 'Turn to off →' : '← Turn to leg'}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex items-center gap-1.5 mt-2">
-              <span className="text-[11px] uppercase tracking-wider text-white/50 mr-1">Field</span>
+            <div className="flex items-center gap-1 mt-1.5">
+              {(dtype === 'swing' || dtype === 'spin' || dtype === 'seam') && (
+                <button
+                  onClick={() => setTurnDir(turnDir === 1 ? -1 : 1)}
+                  title="Tap to switch direction"
+                  className="shrink-0 rounded-lg py-1 px-2 text-[11px] sm:text-xs font-semibold bg-white text-ink mr-1"
+                >
+                  {dtype === 'swing' ? (turnDir === 1 ? 'Out-swing →' : '← In-swing') : dtype === 'seam' ? (turnDir === 1 ? 'Seam away →' : '← Seam in') : turnDir === 1 ? 'Turn to off →' : '← Turn to leg'}
+                </button>
+              )}
+              <span className="hidden sm:inline text-[11px] uppercase tracking-wider text-white/50 mr-1">Field</span>
               {(['attacking', 'balanced', 'defensive'] as FieldSetting[]).map((f) => (
-                <button key={f} onClick={() => setField(f)} className={`flex-1 rounded-lg py-1 text-xs font-semibold ${field === f ? 'bg-tide text-white' : 'bg-white/5 text-white/70'}`}>
+                <button key={f} onClick={() => setField(f)} className={`flex-1 min-w-0 rounded-lg py-1 text-[11px] sm:text-xs font-semibold truncate ${field === f ? 'bg-tide text-white' : 'bg-white/10 text-white/70'}`}>
                   {FIELD_LABEL[f]}
                 </button>
               ))}
             </div>
-            <div className="mt-3 flex items-center gap-3">
-              <div className="relative h-9 flex-1 rounded-full overflow-hidden" style={{ background: 'linear-gradient(90deg,#ff3b3b,#ffb21f 30%,#2bd17e 45%,#2bd17e 55%,#ffb21f 70%,#ff3b3b)' }}>
+            <div className="mt-2 flex items-center gap-2 sm:gap-3">
+              <div className="relative h-7 sm:h-9 flex-1 rounded-full overflow-hidden" style={{ background: 'linear-gradient(90deg,#ff3b3b,#ffb21f 30%,#2bd17e 45%,#2bd17e 55%,#ffb21f 70%,#ff3b3b)' }}>
                 <div ref={meterRef} className="absolute top-0 bottom-0 w-1.5 -ml-[3px] bg-white shadow-[0_0_12px_#fff]" />
               </div>
-              <button onClick={bowl} className="btn-primary rounded-2xl px-6 py-2.5 font-display text-2xl tracking-widest">
+              <button onClick={bowl} className="btn-primary rounded-xl sm:rounded-2xl px-5 sm:px-6 py-1.5 sm:py-2.5 font-display text-xl sm:text-2xl tracking-widest">
                 BOWL
               </button>
             </div>

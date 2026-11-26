@@ -1290,8 +1290,15 @@ export class Scene3D {
     }
     // Match the 2D camera's framing: focal length tied to min(width, 0.72·height).
     const f = Math.min(w, h * 0.72) * this.camZoom
-    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(h / 2 / f))
-    this.camera.aspect = w / h
+    // Controls covering the bottom of the screen: render a taller frame and show its lower part, so
+    // the action is centred in the visible space above them (same scale, shifted up).
+    const want = replay ? 0 : Math.min(this.bottomInset, h * 0.4)
+    this.insetNow += (want - this.insetNow) * Math.min(1, dt * 5)
+    const s = Math.round(this.insetNow)
+    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan((h + s) / 2 / f))
+    this.camera.aspect = w / (h + s)
+    if (s > 0) this.camera.setViewOffset(w, h + s, 0, s, w, h)
+    else this.camera.clearViewOffset()
     this.camera.updateProjectionMatrix()
     this.camera.position.copy(cp)
     this.camera.lookAt(this.camTarget)
@@ -1301,6 +1308,9 @@ export class Scene3D {
     this.key.position.set(c.x + 30, 70, c.z + 25)
   }
   private wasReplay = false
+  /** CSS pixels at the bottom of the canvas hidden by on-screen controls (the camera frames above them). */
+  bottomInset = 0
+  private insetNow = 0
 
   private updateParticles(dt: number) {
     for (const p of this.particles) {
