@@ -13,6 +13,14 @@ Created by **[nick10-05](https://github.com/nick10-05)**.
 
 ---
 
+## Screenshots
+
+| Home | Lobby (2v2) | Batting |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/home.jpg" alt="Home screen with room and practice options" width="240"> | <img src="docs/screenshots/lobby.jpg" alt="Room lobby with two teams of two" width="240"> | <img src="docs/screenshots/batting.jpg" alt="Batting view from behind the stumps" width="240"> |
+| **Bowling** | **Wicket** | **Scorecard** |
+| <img src="docs/screenshots/bowling.jpg" alt="Bowling panel with delivery types, field and power meter" width="240"> | <img src="docs/screenshots/wicket.jpg" alt="Batter bowled, stumps flying" width="240"> | <img src="docs/screenshots/scorecard.jpg" alt="Match result and full scorecard" width="240"> |
+
 ## Features
 
 **Play with friends**
