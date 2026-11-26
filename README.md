@@ -98,6 +98,8 @@ Ball physics are seeded and deterministic, so every client replays exactly the s
 
 If the server can't be reached, the host's browser runs the same `Room` and friends connect directly over WebRTC ([PeerJS](https://peerjs.com)). Practice mode runs it locally against bots.
 
+For the full walkthrough (the life of one ball, disconnects and bots, server protection and the design trade-offs), see [docs/multiplayer.md](docs/multiplayer.md).
+
 ## Project structure
 
 | Path | What |
