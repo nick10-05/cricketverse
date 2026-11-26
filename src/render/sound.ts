@@ -20,6 +20,7 @@ export function isMuted() {
 }
 export function setMuted(m: boolean) {
   muted = m
+  if (m) crowdAmbience(false)
   try {
     localStorage.setItem('cvx-muted', m ? '1' : '0')
   } catch {
@@ -88,4 +89,66 @@ export const sfx = {
   whoosh() {
     noise(0.25, 0.2, 900, 'highpass')
   },
+  /** Stadium drum roll for a boundary. */
+  drums(beats = 6) {
+    if (muted) return
+    for (let i = 0; i < beats; i++) setTimeout(() => tone(i % 2 ? 140 : 95, 0.18, 0.35, 'sine', 0.5), i * 140)
+  },
+  /** Air horn for a six. */
+  horn() {
+    tone(330, 0.7, 0.12, 'sawtooth', 1.02)
+    tone(415, 0.7, 0.08, 'sawtooth', 1.02)
+  },
+  /** Bat-on-ground thud as the batters complete a run. */
+  run() {
+    noise(0.04, 0.2, 400, 'lowpass')
+  },
+}
+
+// ----------------------------------------------------------------------------- crowd ambience
+
+let crowd: { src: AudioBufferSourceNode; gain: GainNode } | null = null
+
+/** Continuous murmur of the crowd. `level` 0..1 swells it (e.g. as a big hit flies). */
+export function crowdAmbience(on: boolean, level = 0.12) {
+  if (!on || muted) {
+    if (crowd) {
+      const c = crowd
+      crowd = null
+      try {
+        c.gain.gain.setTargetAtTime(0, c.gain.context.currentTime, 0.4)
+        setTimeout(() => c.src.stop(), 1500)
+      } catch {
+        /* already stopped */
+      }
+    }
+    return
+  }
+  const a = ac()
+  if (!crowd) {
+    const len = a.sampleRate * 3
+    const buf = a.createBuffer(2, len, a.sampleRate)
+    for (let ch = 0; ch < 2; ch++) {
+      const d = buf.getChannelData(ch)
+      let last = 0
+      for (let i = 0; i < len; i++) {
+        // brown-ish noise with slow swells sounds like a distant crowd
+        last = (last + (Math.random() * 2 - 1) * 0.02) / 1.02
+        d[i] = last * 3.5 * (0.75 + 0.25 * Math.sin((i / len) * Math.PI * 6 + ch))
+      }
+    }
+    const src = a.createBufferSource()
+    src.buffer = buf
+    src.loop = true
+    const f = a.createBiquadFilter()
+    f.type = 'bandpass'
+    f.frequency.value = 700
+    f.Q.value = 0.5
+    const gain = a.createGain()
+    gain.gain.value = 0
+    src.connect(f).connect(gain).connect(a.destination)
+    src.start()
+    crowd = { src, gain }
+  }
+  crowd.gain.gain.setTargetAtTime(level, a.currentTime, 0.5)
 }

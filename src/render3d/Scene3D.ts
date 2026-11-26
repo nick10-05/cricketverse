@@ -1,0 +1,1116 @@
+import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
+import { CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, trajectory, type Fielder, type Trajectory } from '../game/physics'
+import type { BallOutcome, Delivery, FieldSetting, PathPoint, ShotInput, ShotType, TeamId } from '../game/types'
+import type { PlayOptions } from '../render/scene'
+import { TEAM_COLORS } from '../render/scene'
+import { buildStadium, type Stadium } from './stadium'
+import { ballTexture, blobTexture, glowTexture, shade } from './textures'
+import {
+  bowlPose,
+  CATCH_HIGH,
+  Cricketer,
+  divePose,
+  IDLE,
+  KEEPER_CROUCH,
+  lerpPose,
+  READY,
+  runPose,
+  throwPose,
+  umpirePose,
+  type Kit,
+  type Pose,
+} from './cricketer'
+
+export type Quality = 'high' | 'medium' | 'low'
+
+const RUNUP = 1.15
+const BATTER = { x: -0.42, z: -1.0 }
+const NONSTRIKER = { x: -1.05, z: -PITCH_LEN - 0.4 }
+const BAT_CAM = { pos: new THREE.Vector3(1.3, 3.9, 8.6), target: new THREE.Vector3(-0.4, 0.4, -12), zoom: 1.6 }
+const AIM_CAM = { pos: new THREE.Vector3(0.6, 6.4, 8.2), target: new THREE.Vector3(0, 0, -11), zoom: 1.45 }
+const REPLAY_SPEED = 0.6
+/** Seconds the result stays on screen before the next ball. */
+const LINGER = 1.3
+/** After contact the live view runs a little faster than real time, so hits resolve briskly. */
+export const POST_SPEED = 1.25
+
+interface Play {
+  opts: PlayOptions
+  d: Delivery
+  tr: Trajectory
+  field: Fielder[]
+  start: number
+  shot: ShotInput | null
+  outcome: BallOutcome | null
+  resultAt: number | null
+  resultFired: boolean
+  noSwingFired: boolean
+  contactFired: boolean
+  doneFired: boolean
+  replay: { from: number; to: number; startReal: number } | null
+  replayDone: boolean
+}
+
+const pathEnd = (p: PathPoint[]) => (p.length ? p[p.length - 1].t : 0)
+function interp(path: PathPoint[], t: number): THREE.Vector3 {
+  if (!path.length) return new THREE.Vector3()
+  if (t <= path[0].t) return new THREE.Vector3(path[0].x, path[0].y, path[0].z)
+  for (let i = 1; i < path.length; i++) {
+    if (path[i].t >= t) {
+      const a = path[i - 1]
+      const b = path[i]
+      const u = (t - a.t) / Math.max(1e-6, b.t - a.t)
+      return new THREE.Vector3(a.x + (b.x - a.x) * u, a.y + (b.y - a.y) * u, a.z + (b.z - a.z) * u)
+    }
+  }
+  const l = path[path.length - 1]
+  return new THREE.Vector3(l.x, l.y, l.z)
+}
+const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v))
+const smooth = (u: number) => {
+  const x = clamp(u, 0, 1)
+  return x * x * (3 - 2 * x)
+}
+const yawTo = (dx: number, dz: number) => Math.atan2(dx, dz)
+
+/** Critically damped spring toward a target (Game Programming Gems 4, 1.10). Returns [value, velocity]. */
+function smoothDamp(cur: number, target: number, vel: number, time: number, dt: number): [number, number] {
+  const w = 2 / Math.max(0.0001, time)
+  const x = w * dt
+  const e = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+  const ch = cur - target
+  const tmp = (vel + w * ch) * dt
+  const v = (vel - w * tmp) * e
+  return [target + (ch + tmp) * e, v]
+}
+function smoothDampV(cur: THREE.Vector3, target: THREE.Vector3, vel: THREE.Vector3, time: number, dt: number) {
+  for (const k of ['x', 'y', 'z'] as const) {
+    const r = smoothDamp(cur[k], target[k], vel[k], time, dt)
+    cur[k] = r[0]
+    vel[k] = r[1]
+  }
+}
+
+export function detectQuality(): Quality | '2d' {
+  try {
+    const q = localStorage.getItem('cvx-quality')
+    if (q === 'high' || q === 'medium' || q === 'low' || q === '2d') return q
+  } catch {
+    /* ignore */
+  }
+  const c = document.createElement('canvas')
+  const gl = c.getContext('webgl2') || c.getContext('webgl')
+  if (!gl) return '2d'
+  const mobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent)
+  const cores = navigator.hardwareConcurrency ?? 4
+  if (mobile) return cores >= 8 ? 'medium' : 'low'
+  return cores >= 6 ? 'high' : 'medium'
+}
+
+// ----------------------------------------------------------------------------- shot keyframes
+// Bat grip point and blade direction in the batter's local frame
+// (+X toward the bowler, +Z the way the batter faces = off side, -Z leg side).
+type K = { g: [number, number, number]; d: [number, number, number] }
+const STANCE: K = { g: [0.06, 0.78, 0.3], d: [-0.32, -1, -0.04] }
+const BACKLIFT: K = { g: [-0.12, 1.22, 0.22], d: [-0.55, 0.78, -0.18] }
+const SHOTS: Record<ShotType, { impact: K; follow: K; front: boolean }> = {
+  leave: { impact: { g: [-0.05, 1.5, 0.12], d: [-0.3, 0.95, 0.1] }, follow: { g: [-0.05, 1.52, 0.12], d: [-0.3, 0.95, 0.1] }, front: false },
+  miss: { impact: { g: [0.3, 0.8, 0.3], d: [0.3, -0.95, 0.05] }, follow: { g: [0.22, 1.35, 0.05], d: [-0.35, 0.8, -0.45] }, front: true },
+  block: { impact: { g: [0.33, 0.8, 0.28], d: [0.32, -0.95, 0.03] }, follow: { g: [0.34, 0.8, 0.28], d: [0.32, -0.95, 0.03] }, front: true },
+  'straight drive': { impact: { g: [0.32, 0.76, 0.32], d: [0.22, -0.97, 0] }, follow: { g: [0.28, 1.5, 0.05], d: [-0.35, 0.8, -0.45] }, front: true },
+  'cover drive': { impact: { g: [0.3, 0.76, 0.38], d: [0.2, -0.97, 0.1] }, follow: { g: [0.2, 1.48, 0.25], d: [-0.4, 0.75, -0.3] }, front: true },
+  'on drive': { impact: { g: [0.3, 0.76, 0.26], d: [0.2, -0.97, -0.1] }, follow: { g: [0.25, 1.45, -0.1], d: [-0.3, 0.75, -0.6] }, front: true },
+  'lofted drive': { impact: { g: [0.32, 0.8, 0.32], d: [0.35, -0.93, 0] }, follow: { g: [0.15, 1.65, -0.05], d: [-0.55, 0.75, -0.35] }, front: true },
+  flick: { impact: { g: [0.3, 0.74, 0.22], d: [0.25, -0.95, -0.15] }, follow: { g: [0.12, 1.15, -0.2], d: [-0.2, 0.45, -0.87] }, front: true },
+  slog: { impact: { g: [0.24, 0.92, 0.22], d: [0.45, -0.75, -0.45] }, follow: { g: [-0.05, 1.55, -0.25], d: [-0.5, 0.65, -0.55] }, front: true },
+  pull: { impact: { g: [0.16, 1.15, 0.3], d: [0.85, -0.15, 0.5] }, follow: { g: [-0.05, 1.32, -0.15], d: [-0.55, 0.25, -0.8] }, front: false },
+  hook: { impact: { g: [0.12, 1.3, 0.28], d: [0.8, 0.05, 0.6] }, follow: { g: [-0.1, 1.5, -0.2], d: [-0.6, 0.45, -0.65] }, front: false },
+  cut: { impact: { g: [0.2, 1.0, 0.46], d: [0.35, -0.35, 0.87] }, follow: { g: [0.05, 0.86, 0.46], d: [-0.3, -0.6, 0.74] }, front: false },
+  'upper cut': { impact: { g: [0.15, 1.25, 0.45], d: [0.3, 0.1, 0.95] }, follow: { g: [-0.05, 1.5, 0.3], d: [-0.5, 0.7, 0.5] }, front: false },
+}
+const v3 = (a: [number, number, number]) => new THREE.Vector3(a[0], a[1], a[2])
+function lerpK(a: K, b: K, u: number): { g: THREE.Vector3; d: THREE.Vector3 } {
+  return { g: v3(a.g).lerp(v3(b.g), u), d: v3(a.d).normalize().lerp(v3(b.d).normalize(), u).normalize() }
+}
+
+// ----------------------------------------------------------------------------- the scene
+
+export class Scene3D {
+  canvas: HTMLCanvasElement
+  quality: Quality
+  play: Play | null = null
+  aim: { x: number; z: number } | null = null
+  showZones = false
+  /** Field placement shown while idle (the bowler's current choice). */
+  field: FieldSetting = 'balanced'
+  onReplay: ((on: boolean) => void) | null = null
+  /** Whether a non-striker is at the crease (false for a lone batter). */
+  partner = true
+
+  private renderer: THREE.WebGLRenderer
+  private composer: EffectComposer | null = null
+  private bloom: UnrealBloomPass | null = null
+  private scene = new THREE.Scene()
+  private camera = new THREE.PerspectiveCamera(45, 1, 0.1, 900)
+  private stadium: Stadium
+  private key: THREE.DirectionalLight
+  private raf = 0
+  private last = performance.now()
+  private clock = 0
+  private _batting: TeamId = 'A'
+  private _bowling: TeamId = 'B'
+
+  // actors
+  private striker!: Cricketer
+  private nonStriker!: Cricketer
+  private bowler!: Cricketer
+  private keeper!: Cricketer
+  private fielders: Cricketer[] = []
+  private umpires: Cricketer[] = []
+  private fieldPos: THREE.Vector3[] = []
+
+  // props
+  private ball: THREE.Mesh
+  private ballShadow: THREE.Mesh
+  private trail: THREE.Sprite[] = []
+  private trailPts: THREE.Vector3[] = []
+  private bounceRing: THREE.Mesh
+  private aimRing: THREE.Mesh
+  private zones: THREE.Group
+  private stumps: { group: THREE.Group; parts: THREE.Mesh[]; z: number }[] = []
+  private particles: { pts: THREE.Points; vel: Float32Array; life: number; max: number }[] = []
+
+  // camera state
+  private camPos = BAT_CAM.pos.clone()
+  private camTarget = BAT_CAM.target.clone()
+  private camZoom = BAT_CAM.zoom
+  private camPosVel = new THREE.Vector3()
+  private camTargetVel = new THREE.Vector3()
+  private camZoomVel = 0
+  private shake = 0
+  private excitement = 0
+
+  constructor(canvas: HTMLCanvasElement, quality: Quality = 'high') {
+    this.canvas = canvas
+    this.quality = quality
+    const r = new THREE.WebGLRenderer({ canvas, antialias: quality !== 'low', powerPreference: 'high-performance' })
+    r.setPixelRatio(Math.min(window.devicePixelRatio || 1, quality === 'high' ? 2 : quality === 'medium' ? 1.5 : 1))
+    r.outputColorSpace = THREE.SRGBColorSpace
+    r.toneMapping = THREE.ACESFilmicToneMapping
+    r.toneMappingExposure = 1.08
+    r.shadowMap.enabled = quality !== 'low'
+    r.shadowMap.type = THREE.PCFSoftShadowMap
+    this.renderer = r
+
+    const sc = this.scene
+    sc.fog = new THREE.Fog(0x0a1230, 180, 420)
+    sc.background = skyTexture()
+
+    // ---- lights: night match under floodlights
+    sc.add(new THREE.HemisphereLight(0xb8c8ff, 0x1d3b1d, 0.85))
+    const key = new THREE.DirectionalLight(0xfff4e0, 2.4)
+    key.position.set(30, 70, 25)
+    key.castShadow = quality !== 'low'
+    const sm = quality === 'high' ? 2048 : 1024
+    key.shadow.mapSize.set(sm, sm)
+    const sc2 = key.shadow.camera
+    sc2.left = -34
+    sc2.right = 34
+    sc2.top = 34
+    sc2.bottom = -34
+    sc2.near = 10
+    sc2.far = 200
+    key.shadow.bias = -0.0004
+    key.shadow.normalBias = 0.03
+    sc.add(key)
+    sc.add(key.target)
+    this.key = key
+    for (const [x, z, i] of [[-60, -40, 0.7], [50, -70, 0.55], [-40, 60, 0.5]] as const) {
+      const fill = new THREE.DirectionalLight(0xe6ecff, i)
+      fill.position.set(x, 60, z)
+      sc.add(fill)
+    }
+
+    this.stadium = buildStadium(quality)
+    this.stadium.group.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh) o.receiveShadow = true
+    })
+    sc.add(this.stadium.group)
+
+    // ---- stumps at both ends
+    for (const z of [0, -PITCH_LEN]) this.stumps.push(buildStumps(z, quality !== 'low'))
+    for (const s of this.stumps) sc.add(s.group)
+
+    // ---- ball, shadow, trail, markers
+    this.ball = new THREE.Mesh(new THREE.SphereGeometry(0.036 * 1.6, 18, 12), new THREE.MeshStandardMaterial({ map: ballTexture(), roughness: 0.35, emissive: 0x330000 }))
+    this.ball.castShadow = quality !== 'low'
+    sc.add(this.ball)
+    this.ballShadow = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.4), new THREE.MeshBasicMaterial({ map: blobTexture(), transparent: true, depthWrite: false }))
+    this.ballShadow.rotation.x = -Math.PI / 2
+    sc.add(this.ballShadow)
+    const glow = glowTexture()
+    for (let i = 0; i < 18; i++) {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glow, color: 0xfff0c0, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }))
+      s.visible = false
+      this.trail.push(s)
+      sc.add(s)
+    }
+    this.bounceRing = ring(0.22, 0.3, 0xffd23f)
+    sc.add(this.bounceRing)
+    this.aimRing = ring(0.2, 0.32, 0xff3b3b)
+    sc.add(this.aimRing)
+    this.zones = buildZones()
+    sc.add(this.zones)
+
+    this.buildActors()
+
+    if (quality === 'high') {
+      const comp = new EffectComposer(r)
+      comp.addPass(new RenderPass(sc, this.camera))
+      this.bloom = new UnrealBloomPass(new THREE.Vector2(512, 512), 0.55, 0.6, 0.93)
+      comp.addPass(this.bloom)
+      comp.addPass(new OutputPass())
+      this.composer = comp
+    }
+
+    this.loop()
+  }
+
+  // ----------------------------------------------------------------------------- teams / actors
+
+  get batting() {
+    return this._batting
+  }
+  set batting(t: TeamId) {
+    if (t === this._batting) return
+    this._batting = t
+    this.buildActors()
+  }
+  get bowling() {
+    return this._bowling
+  }
+  set bowling(t: TeamId) {
+    if (t === this._bowling) return
+    this._bowling = t
+    this.buildActors()
+  }
+
+  private kit(team: TeamId, role: 'bat' | 'field' | 'keeper'): Kit {
+    const c = TEAM_COLORS[team]
+    return {
+      shirt: c.main,
+      trim: c.dark,
+      trousers: shade(c.dark, -0.15),
+      skin: ['#d9a07a', '#a46a45', '#f0c39f', '#7f4e30'][Math.floor(Math.random() * 4)],
+      hat: role === 'bat' ? 'helmet' : role === 'keeper' ? 'helmet' : Math.random() < 0.6 ? 'cap' : 'none',
+      pads: role !== 'field',
+      gloves: role !== 'field',
+    }
+  }
+
+  private buildActors() {
+    const sh = this.quality !== 'low'
+    const ol = this.quality === 'high' // cartoon outlines cost a draw call per part, so only on High
+    for (const a of [this.striker, this.nonStriker, this.bowler, this.keeper, ...this.fielders, ...this.umpires]) a?.dispose()
+    this.striker = new Cricketer('batter', this.kit(this._batting, 'bat'), sh, { bat: true, outline: ol })
+    this.nonStriker = new Cricketer('batter', this.kit(this._batting, 'bat'), sh, { bat: true, outline: ol })
+    this.bowler = new Cricketer('bowler', { ...this.kit(this._bowling, 'field'), hat: 'none' }, sh, { outline: ol })
+    this.keeper = new Cricketer('keeper', this.kit(this._bowling, 'keeper'), sh, { outline: ol })
+    this.fielders = []
+    for (let i = 2; i < 11; i++) this.fielders.push(new Cricketer('fielder', this.kit(this._bowling, 'field'), sh && this.quality === 'high', { outline: ol }))
+    const umpKit: Kit = { shirt: '#f2efe6', trim: '#1b1f2e', trousers: '#1b1f2e', skin: '#b98260', hat: 'hat', pads: false, gloves: false }
+    this.umpires = [new Cricketer('umpire', umpKit, sh, { outline: ol }), new Cricketer('umpire', umpKit, false, { outline: ol })]
+    for (const a of [this.striker, this.nonStriker, this.bowler, this.keeper, ...this.fielders, ...this.umpires]) this.scene.add(a.root)
+    this.fieldPos = FIELDS[this.field].map((f) => new THREE.Vector3(f.x, 0, f.z))
+  }
+
+  destroy() {
+    cancelAnimationFrame(this.raf)
+    window.removeEventListener('resize', this.onResize)
+    this.renderer.dispose()
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh
+      m.geometry?.dispose?.()
+    })
+  }
+
+  private onResize = () => this.resize()
+
+  private loop = () => {
+    this.raf = requestAnimationFrame(this.loop)
+    const now = performance.now()
+    const dt = Math.min(0.05, (now - this.last) / 1000)
+    this.last = now
+    this.clock += dt
+    this.frame(now, dt)
+  }
+
+  // ----------------------------------------------------------------------------- play control (same API as the 2D Scene)
+
+  playDelivery(opts: PlayOptions) {
+    const tr = trajectory(opts.delivery)
+    this.play = {
+      opts,
+      d: opts.delivery,
+      tr,
+      field: fieldFor(opts.delivery),
+      start: performance.now(),
+      shot: opts.shot ?? null,
+      outcome: opts.outcome ?? null,
+      resultAt: null,
+      resultFired: false,
+      noSwingFired: false,
+      contactFired: false,
+      doneFired: false,
+      replay: null,
+      replayDone: false,
+    }
+    if (opts.delivery.field) this.field = opts.delivery.field
+    this.aim = null
+    if (opts.outcome) this.setOutcome(opts.outcome)
+  }
+
+  flightTime(now = performance.now()) {
+    if (!this.play) return -99
+    return (now - this.play.start) / 1000 - RUNUP
+  }
+
+  swing(dir: number, loft: boolean, now = performance.now()): ShotInput | null {
+    const p = this.play
+    if (!p || !p.opts.live || p.shot) return null
+    const t = this.flightTime(now)
+    if (t < 0.05) return null
+    const timing = (t - p.tr.tContact) * 1000
+    p.shot = { swung: true, dir, loft, timing }
+    return p.shot
+  }
+
+  forceOutcome(shot: ShotInput, o: BallOutcome) {
+    const p = this.play
+    if (!p) return
+    p.shot = shot
+    p.noSwingFired = true
+    this.setOutcome(o)
+  }
+
+  setOutcome(o: BallOutcome) {
+    const p = this.play
+    if (!p) return
+    p.outcome = o
+    const tr = p.tr
+    if (o.path.length) p.resultAt = tr.tContact + pathEnd(o.path) + (o.wicket === 'run out' && o.throwPath.length ? pathEnd(o.throwPath) - pathEnd(o.path) : 0)
+    else p.resultAt = o.wicket === 'bowled' || o.wicket === 'lbw' ? tr.tStumps + 0.05 : tr.tStumps + 0.25
+  }
+
+  /** For the batting timing bar: where the live ball is relative to the contact moment. */
+  timingProbe(now = performance.now()) {
+    const p = this.play
+    if (!p || !p.opts.live) return null
+    return { t: this.flightTime(now), tContact: p.tr.tContact, d: p.d, shot: p.shot }
+  }
+
+  isBusy() {
+    return !!this.play
+  }
+
+  /** Skip an in-progress replay. */
+  skipReplay() {
+    const p = this.play
+    if (p?.replay) p.replay.startReal = -1e9
+  }
+
+  burst(kind: 'four' | 'six' | 'wicket', at?: THREE.Vector3) {
+    const colors = kind === 'wicket' ? [0xff3b3b, 0xffffff, 0xffb3b3] : [0xffd23f, 0xff6a1f, 0x1aa7ff, 0xffffff, 0x2bd17e, 0xff5fa2]
+    const spots: THREE.Vector3[] = []
+    if (kind === 'six') for (let i = 0; i < 5; i++) spots.push(new THREE.Vector3((Math.random() - 0.5) * 160, 55 + Math.random() * 25, -10 + (Math.random() - 0.5) * 160))
+    else spots.push(at ?? new THREE.Vector3(0, 2, -1))
+    for (const s of spots) this.spawnParticles(s, kind === 'six' ? 220 : kind === 'four' ? 140 : 80, colors, kind === 'six' ? 16 : kind === 'four' ? 7 : 4)
+    if (kind === 'wicket') this.shake = 0.45
+    this.excitement = kind === 'six' ? 1 : kind === 'four' ? 0.8 : 0.7
+  }
+
+  private spawnParticles(at: THREE.Vector3, n: number, colors: number[], speed: number) {
+    const pos = new Float32Array(n * 3)
+    const col = new Float32Array(n * 3)
+    const vel = new Float32Array(n * 3)
+    const c = new THREE.Color()
+    for (let i = 0; i < n; i++) {
+      pos.set([at.x, at.y, at.z], i * 3)
+      const th = Math.random() * Math.PI * 2
+      const ph = Math.acos(2 * Math.random() - 1)
+      const sp = speed * (0.4 + Math.random() * 0.6)
+      vel.set([Math.sin(ph) * Math.cos(th) * sp, Math.abs(Math.cos(ph)) * sp * 0.8 + speed * 0.3, Math.sin(ph) * Math.sin(th) * sp], i * 3)
+      c.setHex(colors[i % colors.length])
+      col.set([c.r, c.g, c.b], i * 3)
+    }
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3))
+    const m = new THREE.PointsMaterial({ size: speed > 10 ? 1.4 : 0.35, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, map: glowTexture() })
+    const pts = new THREE.Points(g, m)
+    this.scene.add(pts)
+    this.particles.push({ pts, vel, life: 0, max: 2.2 })
+  }
+
+  setScoreboard(big: string, small: string, color: string) {
+    this.stadium.scoreboard({ big, small, color })
+  }
+
+  // ----------------------------------------------------------------------------- input helpers
+
+  private ray = new THREE.Raycaster()
+  groundAt(sx: number, sy: number) {
+    const r = this.canvas.getBoundingClientRect()
+    const ndc = new THREE.Vector2((sx / r.width) * 2 - 1, -(sy / r.height) * 2 + 1)
+    this.ray.setFromCamera(ndc, this.camera)
+    const o = this.ray.ray.origin
+    const d = this.ray.ray.direction
+    if (d.y >= -1e-4) return null
+    const k = -o.y / d.y
+    return { x: o.x + d.x * k, z: o.z + d.z * k }
+  }
+
+  batterScreen() {
+    const r = this.canvas.getBoundingClientRect()
+    const v = new THREE.Vector3(0, 0.8, CONTACT_Z).project(this.camera)
+    return { x: (v.x * 0.5 + 0.5) * r.width, y: (-v.y * 0.5 + 0.5) * r.height }
+  }
+
+  // ----------------------------------------------------------------------------- frame
+
+  resize() {
+    const r = this.canvas.getBoundingClientRect()
+    const w = Math.max(1, Math.round(r.width))
+    const h = Math.max(1, Math.round(r.height))
+    this.renderer.setSize(w, h, false)
+    this.composer?.setSize(w, h)
+    this.camera.aspect = w / h
+    this.camera.updateProjectionMatrix()
+  }
+
+  private sizeKey = ''
+  private frame(now: number, dt: number) {
+    const r = this.canvas.getBoundingClientRect()
+    const key = `${Math.round(r.width)}x${Math.round(r.height)}`
+    if (key !== this.sizeKey) {
+      this.sizeKey = key
+      this.resize()
+    }
+    if (r.width < 10 || r.height < 10) return
+
+    const p = this.play
+    const rawT = p ? this.flightTime(now) : -99
+    const realT = p && rawT > p.tr.tContact ? p.tr.tContact + (rawT - p.tr.tContact) * POST_SPEED : rawT
+    let viewT = realT
+    if (p?.replay) viewT = p.replay.from + ((now - p.replay.startReal) / 1000) * REPLAY_SPEED
+
+    this.updateWorld(p, viewT, dt, !!p?.replay)
+    this.updateCamera(p, viewT, dt, !!p?.replay, r.width, r.height)
+    this.updateParticles(dt)
+    this.stadium.crowd.update(this.clock, this.excitement)
+    this.excitement = Math.max(0.05, this.excitement - dt * 0.12)
+
+    if (this.composer) this.composer.render()
+    else this.renderer.render(this.scene, this.camera)
+
+    if (p) this.tick(p, realT, now)
+  }
+
+  private tick(p: Play, t: number, now: number) {
+    if (p.opts.live && !p.shot && !p.noSwingFired && this.flightTime(now) > p.tr.tContact + 0.32) {
+      p.noSwingFired = true
+      p.shot = { swung: false, dir: 0, loft: false, timing: 0 }
+      p.opts.onNoSwing?.()
+    }
+    if (p.outcome && p.outcome.path.length && !p.contactFired && t >= p.tr.tContact) {
+      p.contactFired = true
+      p.opts.onContact?.(p.outcome)
+    }
+    if (p.outcome && p.resultAt !== null && !p.resultFired && t >= p.resultAt) {
+      p.resultFired = true
+      const o = p.outcome
+      const endP = o.path.length ? o.path[o.path.length - 1] : null
+      if (o.boundary === 6) this.burst('six')
+      else if (o.boundary === 4 && endP) this.burst('four', new THREE.Vector3(endP.x, 1.5, endP.z))
+      else if (o.wicket) this.burst('wicket', new THREE.Vector3(0, 1, o.wicket === 'run out' ? (o.throwPath.at(-1)?.z ?? 0) : 0))
+      p.opts.onResult?.(o)
+    }
+    if (p.resultFired && !p.doneFired) {
+      const o = p.outcome!
+      const wantReplay = (o.boundary === 6 || !!o.wicket) && !p.replayDone
+      const since = t - (p.resultAt ?? 0)
+      if (wantReplay && !p.replay && since >= 0.7) {
+        const from = o.path.length ? p.tr.tContact - 0.5 : p.tr.tStumps - 0.6
+        const to = o.path.length ? Math.min(p.resultAt!, p.tr.tContact + 0.95) : p.tr.tStumps + 0.5
+        p.replay = { from, to, startReal: now }
+        this.onReplay?.(true)
+      }
+      if (p.replay) {
+        const el = ((now - p.replay.startReal) / 1000) * REPLAY_SPEED
+        if (el >= p.replay.to - p.replay.from) {
+          p.replay = null
+          p.replayDone = true
+          this.onReplay?.(false)
+          this.finish(p)
+        }
+      } else if (!wantReplay && since >= LINGER) this.finish(p)
+    }
+  }
+
+  private finish(p: Play) {
+    p.doneFired = true
+    const cb = p.opts.onDone
+    this.play = null
+    cb?.()
+  }
+
+  // ----------------------------------------------------------------------------- world state
+
+  private updateWorld(p: Play | null, t: number, dt: number, replay: boolean) {
+    const field = p ? p.field : FIELDS[this.field]
+    const o = p?.outcome ?? null
+    const tr = p?.tr ?? null
+    const hitT = p && o && o.path.length && t >= tr!.tContact ? t - tr!.tContact : null
+    const pEnd = o ? pathEnd(o.path) : 0
+
+    // ---- ball
+    let ball = new THREE.Vector3(0.5, 2.1, -20)
+    let ballVisible = false
+    if (p && tr) {
+      if (t < 0) {
+        ballVisible = true // in the bowler's hand, placed below
+      } else if (hitT !== null && o) {
+        ballVisible = true
+        if (hitT <= pEnd) ball = interp(o.path, hitT)
+        else if (o.throwPath.length && hitT >= o.throwPath[0].t) ball = interp(o.throwPath, hitT)
+        else if (o.wicket === 'caught' || o.wicket === 'caught behind') {
+          const f = o.fielder === 0 ? this.keeper : o.fielder === 1 ? this.bowler : this.fielders[o.fielder - 2]
+          ball = f ? f.handWorld('r') : interp(o.path, pEnd)
+        } else ball = interp(o.path, pEnd)
+      } else {
+        ballVisible = true
+        const tt = Math.min(t, tr.tStumps + 0.6)
+        ball = v(tr.pos(tt))
+        if ((o?.wicket === 'bowled') && t > tr.tStumps) {
+          const u = t - tr.tStumps
+          const s = tr.pos(tr.tStumps)
+          ball = new THREE.Vector3(s.x + u * 0.6, Math.max(0.04, s.y + u * 1.2 - 4 * u * u), s.z + u * 1.2)
+        } else if (o?.wicket === 'lbw' && t > tr.tContact) {
+          const u = t - tr.tContact
+          const c = tr.pos(tr.tContact)
+          ball = new THREE.Vector3(c.x + u * 0.4, Math.max(0.04, c.y - 4 * u * u), c.z - u * 1.5)
+        } else if (ball.z > 2.95) {
+          ball = new THREE.Vector3(ball.x * 0.5, Math.max(0.6, ball.y), 2.95) // into the keeper's gloves
+        }
+      }
+    }
+
+    // ---- bowler
+    const bw = this.bowler
+    const releaseX = p ? 0.35 * p.d.turn * (p.d.type === 'spin' ? 0.4 : 1) : 0.35
+    const bx = releaseX + 0.28
+    if (!p) {
+      bw.root.position.set(bx, 0, -33)
+      bw.root.rotation.y = 0
+      bw.setPose(lerpPose(IDLE, { spine: [0.05, 0, 0] }, 0.5))
+      bw.heldBall!.visible = true
+    } else if (t < 0) {
+      const u = (t + RUNUP) / RUNUP
+      const z = THREE.MathUtils.lerp(-33, -20.6, Math.min(1, u))
+      bw.root.position.set(bx, 0, z)
+      bw.root.rotation.y = 0
+      const run = runPose(t * 15, 0.9)
+      bw.setPose(t > -0.32 ? lerpPose(run, bowlPose(t), smooth((t + 0.32) / 0.12)) : run)
+      bw.heldBall!.visible = true
+    } else {
+      bw.heldBall!.visible = false
+      const ft = Math.min(t, 1.2)
+      const z = -20.6 + 3.6 * (1 - Math.pow(1 - ft / 1.2, 2))
+      bw.root.position.set(bx + ft * 0.4, 0, z)
+      const fielderIdx = o?.fielder ?? -1
+      if (hitT !== null && fielderIdx === 1 && o) this.animateChaser(bw, o, hitT, pEnd, new THREE.Vector3(bx + 0.5, 0, -17))
+      else if (t < 0.45) bw.setPose(bowlPose(t))
+      else if (t < 1.2) bw.setPose(lerpPose(runPose(t * 12, 1.1 - t), READY, smooth((t - 0.8) / 0.4)))
+      else bw.setPose(READY)
+      if (hitT === null || fielderIdx !== 1) bw.root.rotation.y = hitT !== null ? yawTo(ball.x - bw.root.position.x, ball.z - bw.root.position.z) : 0
+    }
+    if (p && t < 0) ball = bw.handWorld('r')
+
+    // ---- striker
+    this.animateStriker(p, t, hitT, pEnd)
+
+    // ---- non-striker: backs up, then runs
+    const ns = this.nonStriker
+    ns.root.visible = this.partner
+    const runs = o && !o.boundary && !o.wicket && o.extra !== 'wide' ? (o.extra === 'noball' ? o.runs - 1 : o.runs) : o?.wicket === 'run out' ? Math.max(1, o.runs) : 0
+    const runDur = clamp((pEnd + 1.4) / Math.max(1, runs), 1.3, 2.4)
+    if (hitT !== null && runs > 0) {
+      this.animateRunner(ns, hitT, runs, runDur, -1, 0.75)
+    } else {
+      const backing = p && t > -0.3 ? Math.min(1.4, (t + 0.3) * 1.6) : 0
+      ns.root.position.set(NONSTRIKER.x, 0, NONSTRIKER.z + backing)
+      ns.root.rotation.y = 0
+      ns.setPose(backing > 0.05 && backing < 1.4 ? runPose(t * 9, 0.25) : IDLE)
+      ns.holdBat(new THREE.Vector3(-0.15, 0.8, 0.22), new THREE.Vector3(0.1, -1, 0.35), new THREE.Vector3(0, 0, 1))
+    }
+
+    // ---- keeper
+    const kp = this.keeper
+    kp.root.rotation.y = Math.PI
+    kp.root.position.set(0, 0, 3.2)
+    if (hitT !== null && o?.fielder === 0 && o.wicket === 'caught behind') {
+      kp.setPose(lerpPose(KEEPER_CROUCH, CATCH_HIGH, smooth(hitT / 0.3)))
+      kp.root.position.x = THREE.MathUtils.lerp(0, o.path.at(-1)!.x, smooth(hitT / 0.3))
+    } else if (p && tr && t > tr.tBounce && hitT === null) {
+      const u = smooth((t - tr.tBounce) / 0.35)
+      kp.setPose(lerpPose(KEEPER_CROUCH, lerpPose(READY, CATCH_HIGH, 0.4), u))
+      kp.root.position.x = THREE.MathUtils.lerp(0, clamp(ball.x, -1, 1), u)
+    } else if (hitT !== null) {
+      // after a hit, the keeper runs up to the stumps for the return
+      const u = smooth(hitT / 1.2)
+      kp.root.position.set(0.3, 0, THREE.MathUtils.lerp(3.2, 1.3, u))
+      kp.setPose(lerpPose(KEEPER_CROUCH, READY, u))
+    } else kp.setPose(KEEPER_CROUCH)
+
+    // ---- fielders (indices 2..10 of the field)
+    const walkIn = p ? smooth((t + RUNUP) / (RUNUP + 0.3)) * 1.8 : 0
+    for (let i = 2; i < 11; i++) {
+      const f = this.fielders[i - 2]
+      const base = field[i]
+      // drift smoothly toward a new field setting between balls
+      const fp = this.fieldPos[i] ?? new THREE.Vector3(base.x, 0, base.z)
+      fp.x += (base.x - fp.x) * Math.min(1, dt * 1.5)
+      fp.z += (base.z - fp.z) * Math.min(1, dt * 1.5)
+      this.fieldPos[i] = fp
+      const toBat = new THREE.Vector3(-fp.x, 0, -1 - fp.z).normalize()
+      const home = fp.clone().addScaledVector(toBat, walkIn)
+      if (hitT !== null && o && i === o.fielder) {
+        this.animateChaser(f, o, hitT, pEnd, home)
+      } else if (hitT !== null && o) {
+        // back up: drift a few metres toward the ball
+        const d = new THREE.Vector3(ball.x - home.x, 0, ball.z - home.z)
+        const dist = d.length() || 1
+        const move = Math.min(Math.max(0, hitT - 0.3) * 2.5, 5, dist * 0.3)
+        f.root.position.copy(home).addScaledVector(d.normalize(), move)
+        f.root.rotation.y = yawTo(ball.x - f.root.position.x, ball.z - f.root.position.z)
+        f.setPose(move > 0.1 && hitT < pEnd + 0.4 ? runPose(hitT * 11, 0.8) : READY)
+      } else {
+        f.root.position.copy(home)
+        f.root.rotation.y = yawTo(-home.x, -1 - home.z)
+        const moving = p && t < 0.1 && walkIn < 1.75
+        f.setPose(moving ? runPose(t * 8, 0.25) : p ? READY : IDLE)
+      }
+      // celebrate a wicket
+      if (o?.wicket && p?.resultFired && !replay) {
+        const j = Math.max(0, Math.sin((this.clock + i) * 7)) * 0.25
+        f.setPose(lerpPose(CATCH_HIGH, READY, 0.2))
+        f.root.position.y = j
+      } else f.root.position.y = 0
+    }
+
+    // ---- umpires
+    const [u1, u2] = this.umpires
+    u1.root.position.set(-0.2, 0, -PITCH_LEN - 2.4)
+    u1.root.rotation.y = 0
+    u2.root.position.set(-24, 0, -1)
+    u2.root.rotation.y = Math.PI / 2
+    let signal: Parameters<typeof umpirePose>[0] = 'none'
+    if (o && p?.resultFired && !replay) {
+      signal = o.boundary === 6 && !o.extra ? 'six' : o.boundary === 4 && !o.extra ? 'four' : o.wicket ? 'out' : o.extra === 'wide' ? 'wide' : o.extra === 'noball' ? 'noball' : o.extra === 'bye' || o.extra === 'legbye' ? 'bye' : 'none'
+    }
+    u1.setPose(umpirePose(signal, this.clock))
+    u2.setPose(umpirePose('none', this.clock))
+    if (p && t < 0) u1.root.position.x = -0.9 // step aside for the bowler
+
+    // ---- stumps
+    for (let k = 0; k < this.stumps.length; k++) {
+      const s = this.stumps[k]
+      let hitAt: number | null = null
+      if (p && tr && o) {
+        if (k === 0 && o.wicket === 'bowled') hitAt = tr.tStumps
+        if (o.wicket === 'run out' && o.throwPath.length) {
+          const endZ = o.throwPath.at(-1)!.z
+          if ((k === 0 && endZ > -10) || (k === 1 && endZ <= -10)) hitAt = tr.tContact + pathEnd(o.throwPath)
+        }
+        if (o.wicket === 'stumped' && k === 0) hitAt = tr.tStumps + 0.3
+      }
+      breakStumps(s, hitAt !== null && t >= hitAt ? t - hitAt : -1)
+    }
+
+    // ---- ball, shadow, trail, markers
+    this.ball.visible = ballVisible && !(p && t < 0)
+    this.ball.position.copy(ball)
+    this.ball.rotation.x += dt * 25
+    // Grow the ball a little with camera distance so it never shrinks to a speck on big hits.
+    const bs = clamp(this.camera.position.distanceTo(ball) / 13, 1.1, 3.2)
+    this.ball.scale.setScalar(bs)
+    this.ballShadow.visible = this.ball.visible
+    this.ballShadow.position.set(ball.x, 0.02, ball.z)
+    const sh = 0.6 + ball.y * 0.15
+    this.ballShadow.scale.set(sh, sh, sh)
+    ;(this.ballShadow.material as THREE.MeshBasicMaterial).opacity = clamp(1 - ball.y * 0.06, 0.15, 0.9)
+
+    const trailOn = this.ball.visible && (hitT !== null || (p && t > 0))
+    if (trailOn) {
+      this.trailPts.push(ball.clone())
+      if (this.trailPts.length > this.trail.length) this.trailPts.shift()
+    } else this.trailPts.length = 0
+    for (let i = 0; i < this.trail.length; i++) {
+      const s = this.trail[i]
+      const pt = this.trailPts[this.trailPts.length - 1 - i]
+      s.visible = !!pt
+      if (pt) {
+        s.position.copy(pt)
+        const k = 1 - i / this.trail.length
+        const sz = (hitT !== null ? 0.9 + bs * 0.25 : 0.5) * k
+        s.scale.set(sz, sz, 1)
+        ;(s.material as THREE.SpriteMaterial).opacity = 0.55 * k
+      }
+    }
+
+    // pitch marker: where the ball will land (shown from release until it bounces)
+    this.bounceRing.visible = !!(p && tr && t > -0.1 && t < tr.tBounce + 0.25)
+    if (tr) this.bounceRing.position.set(tr.bounceX, 0.02, tr.bounceZ)
+    ;(this.bounceRing.material as THREE.MeshBasicMaterial).opacity = tr && t > tr.tBounce ? clamp(1 - (t - tr.tBounce) / 0.25, 0, 1) : 0.9
+    this.zones.visible = this.showZones
+    this.aimRing.visible = !!this.aim && this.showZones
+    if (this.aim) {
+      this.aimRing.position.set(this.aim.x, 0.025, this.aim.z)
+      const s = 1 + Math.sin(this.clock * 6) * 0.08
+      this.aimRing.scale.set(s, s, s)
+    }
+  }
+
+  private animateStriker(p: Play | null, t: number, hitT: number | null, pEnd: number) {
+    const b = this.striker
+    b.root.position.set(BATTER.x, 0, BATTER.z)
+    b.root.rotation.y = Math.PI / 2
+    const o = p?.outcome ?? null
+    const stance: Pose = {
+      spine: [0.32, 0, 0],
+      chest: [0, 0.15, 0],
+      neck: [-0.12, 1.15, 0],
+      lHip: [-0.12, 0, 0.16],
+      rHip: [0.05, 0, -0.16],
+      lKnee: [0.35, 0, 0],
+      rKnee: [0.3, 0, 0],
+      offset: [0, -0.06, 0],
+    }
+    // Running between the wickets
+    const runs = o && !o.boundary && !o.wicket && o.extra !== 'wide' ? (o.extra === 'noball' ? o.runs - 1 : o.runs) : o?.wicket === 'run out' ? Math.max(1, o.runs) : 0
+    if (p && hitT !== null && runs > 0 && hitT > 0.45) {
+      const runDur = clamp((pEnd + 1.4) / Math.max(1, runs), 1.3, 2.4)
+      this.animateRunner(b, hitT - 0.2, runs, runDur, 1, -0.75)
+      return
+    }
+    if (!p) {
+      b.setPose(stance)
+      const k = lerpK(STANCE, STANCE, 0)
+      b.holdBat(k.g, k.d, new THREE.Vector3(1, 0, 0))
+      return
+    }
+    const tr = p.tr
+    const shot = p.shot
+    const type: ShotType = shot ? (o?.shot ?? (shot.swung ? (shot.dir < -0.4 ? 'flick' : shot.dir > 0.4 ? 'cover drive' : 'straight drive') : 'leave')) : 'leave'
+    const def = SHOTS[type] ?? SHOTS['straight drive']
+    const tc = shot?.swung ? tr.tContact + shot.timing / 1000 : tr.tContact
+    // Backlift as the bowler releases; leave = lift the bat high out of the way.
+    const lift = smooth((t - (tr.tContact - 0.6)) / 0.35)
+    let k = lerpK(STANCE, BACKLIFT, lift)
+    const front = o ? o.footwork === 'front' : def.front
+    const stride = smooth((t - (tc - 0.32)) / 0.22)
+    let pose: Pose
+    if (front) {
+      pose = lerpPose(stance, { ...stance, lHip: [-0.25, 0, 0.55], lKnee: [0.55, 0, 0], rHip: [0.15, 0, -0.25], rKnee: [0.2, 0, 0], spine: [0.42, 0, 0], offset: [0.16, -0.1, 0] }, stride)
+    } else {
+      pose = lerpPose(stance, { ...stance, rHip: [0.1, 0, -0.4], lHip: [-0.1, 0, 0.1], lKnee: [0.15, 0, 0], rKnee: [0.15, 0, 0], spine: [0.15, 0, 0], offset: [-0.12, 0, 0] }, stride)
+    }
+    if (shot?.swung || type === 'leave') {
+      const down = (t - (tc - 0.14)) / 0.16
+      const fol = (t - (tc + 0.02)) / 0.34
+      if (type === 'leave') {
+        k = lerpK(BACKLIFT, def.impact, smooth((t - (tr.tContact - 0.3)) / 0.25))
+      } else if (down >= 0 && fol < 0) {
+        k = lerpK(BACKLIFT, def.impact, smooth(down))
+      } else if (fol >= 0) {
+        k = lerpK(def.impact, def.follow, smooth(fol))
+        // rotate the follow-through toward where the ball went
+        if (hitT !== null && o?.path.length) {
+          const end = o.path[Math.min(o.path.length - 1, 4)]
+          const ang = Math.atan2(end.x - BATTER.x, -(end.z - BATTER.z)) // 0 = straight, + = off side
+          const rot = clamp(ang, -1.6, 1.6) * 0.35
+          k.g.applyAxisAngle(new THREE.Vector3(0, 1, 0), -rot)
+          k.d.applyAxisAngle(new THREE.Vector3(0, 1, 0), -rot).normalize()
+        }
+        pose = lerpPose(pose, { ...pose, chest: [0, -0.5, 0], spine: [0.25, -0.2, 0] }, smooth(fol) * 0.6)
+      }
+    }
+    // Out: drop the bat a little and look down
+    if (o?.wicket && p.resultFired && hitT === null) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0, 0] }, 0.7)
+    if (o?.wicket && p.resultFired && o.path.length) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0.6, 0] }, 0.6)
+    b.setPose(pose)
+    b.holdBat(k.g, k.d, new THREE.Vector3(1, 0, 0.2))
+  }
+
+  /** Run `runs` lengths between the creases. dir +1 = striker (starts at the striker's end). */
+  private animateRunner(r: Cricketer, t: number, runs: number, runDur: number, dir: 1 | -1, laneX: number) {
+    const zA = BATTER.z
+    const zB = -PITCH_LEN + 1.0
+    const leg = Math.min(runs, Math.floor(Math.max(0, t) / runDur))
+    const u = leg >= runs ? 1 : (Math.max(0, t) % runDur) / runDur
+    const fromStriker = (leg % 2 === 0) === (dir === 1)
+    const z0 = fromStriker ? zA : zB
+    const z1 = fromStriker ? zB : zA
+    const done = leg >= runs
+    const endFromStriker = (runs % 2 === 0) === (dir === 1)
+    const z = done ? (endFromStriker ? zA : zB) : THREE.MathUtils.lerp(z0, z1, smooth(u * 1.1))
+    r.root.position.set(laneX, 0, z)
+    r.root.rotation.y = done ? (endFromStriker ? Math.PI : 0) : z1 < z0 ? Math.PI : 0
+    if (done) r.setPose(IDLE)
+    else r.setPose(runPose(t * 13, 1))
+    r.holdBat(new THREE.Vector3(-0.2, 0.9, 0.25), new THREE.Vector3(0.1, -0.6, 0.8).normalize(), new THREE.Vector3(1, 0, 0))
+  }
+
+  /** Fielder going for the ball: run, dive or catch, then throw it in. */
+  private animateChaser(f: Cricketer, o: BallOutcome, hitT: number, pEnd: number, home: THREE.Vector3) {
+    const fp = o.fielderPath
+    const at = fp.length ? interp(fp, Math.min(hitT, pEnd)) : home
+    if (hitT < 0.32) at.copy(home)
+    const target = o.path.at(-1)!
+    f.root.position.set(at.x, 0, at.z)
+    const moving = hitT < pEnd && hitT >= 0.32
+    if (moving) f.root.rotation.y = yawTo(target.x - home.x, target.z - home.z)
+    const caught = o.wicket === 'caught'
+    if (hitT < pEnd - 0.25) {
+      f.setPose(hitT < 0.32 ? READY : runPose(hitT * 13, 1))
+    } else if (caught) {
+      const u = smooth((hitT - (pEnd - 0.25)) / 0.25)
+      f.setPose(o.dive ? divePose(u) : lerpPose(READY, CATCH_HIGH, u))
+      if (o.dive) f.root.position.y = 0
+    } else {
+      // collect, then throw at the stumps
+      const throwStart = o.throwPath.length ? o.throwPath[0].t : pEnd + 0.5
+      if (o.dive && hitT < pEnd + 0.6) f.setPose(divePose(smooth((hitT - (pEnd - 0.25)) / 0.25)))
+      else if (hitT < throwStart - 0.35) f.setPose(lerpPose(READY, IDLE, 0.3))
+      else {
+        const u = clamp((hitT - (throwStart - 0.35)) / 0.5, 0, 1)
+        const endP = o.throwPath.at(-1)
+        if (endP) f.root.rotation.y = yawTo(endP.x - at.x, endP.z - at.z)
+        f.setPose(throwPose(u))
+      }
+    }
+  }
+
+  // ----------------------------------------------------------------------------- camera director
+
+  private updateCamera(p: Play | null, t: number, dt: number, replay: boolean, w: number, h: number) {
+    const o = p?.outcome ?? null
+    const tr = p?.tr
+    const hitT = p && o && o.path.length && t >= tr!.tContact ? t - tr!.tContact : null
+    const ball = this.ball.position
+    let pos = BAT_CAM.pos.clone()
+    let target = BAT_CAM.target.clone()
+    let zoom = BAT_CAM.zoom
+    let rate = 0.55 // smoothing time (s): lower = snappier
+
+    if (!p && this.showZones) {
+      pos = AIM_CAM.pos.clone()
+      target = AIM_CAM.target.clone()
+      zoom = AIM_CAM.zoom
+    } else if (replay && p) {
+      // Side-on replay camera, tracking the ball at half speed.
+      if (hitT !== null) {
+        const look = ball.clone().lerp(new THREE.Vector3(BATTER.x, 1, BATTER.z), clamp(1 - hitT, 0, 1) * 0.6)
+        pos = new THREE.Vector3(look.x - 13, 3 + ball.y * 0.4, look.z + 6)
+        target = look
+        zoom = 1.9
+      } else {
+        pos = new THREE.Vector3(-7, 1.4, 1.6)
+        target = new THREE.Vector3(0, 0.6, -1.2)
+        zoom = 2.2
+      }
+      rate = 0.12
+    } else if (hitT !== null && o && !o.edged) {
+      // Follow cam: stays at the batting end, rises and pulls back, and pans to keep the ball in frame.
+      // It never orbits round the ground, so big hits stay easy to read.
+      const g = new THREE.Vector3(ball.x, 0, ball.z)
+      const d = Math.hypot(g.x - BATTER.x, g.z - BATTER.z)
+      const behind = clamp((g.z - 2) / 20, 0, 1) // ball going fine, behind the batter
+      pos = new THREE.Vector3(g.x * 0.22, 4.5 + Math.min(24, d * 0.36) + behind * 10, 9 + Math.min(18, d * 0.26) + Math.max(0, g.z) * 0.9)
+      target = new THREE.Vector3(g.x, Math.min(ball.y, 18) * 0.45, g.z)
+      zoom = 1.45 + Math.min(0.75, d * 0.011)
+      rate = 0.42 // smoothing time in seconds for the follow cam
+    } else if (p && tr && o && (o.wicket === 'bowled' || o.wicket === 'lbw' || o.wicket === 'stumped') && t > tr.tStumps) {
+      // leg side, so slips and gully never block the shot
+      pos = new THREE.Vector3(-2.7, 1.0, 1.9)
+      target = new THREE.Vector3(0.05, 0.42, -0.1)
+      zoom = 2.1
+      rate = 0.2
+    } else if (hitT !== null && o?.edged) {
+      pos = new THREE.Vector3(5, 4, 9)
+      target = new THREE.Vector3(ball.x * 0.5, 0.8, ball.z * 0.5)
+      zoom = 1.5
+    }
+
+    const snap = replay !== this.wasReplay
+    this.wasReplay = replay
+    if (snap) {
+      // hard cut into and out of replays, like TV
+      this.camPos.copy(replay ? pos : BAT_CAM.pos)
+      this.camTarget.copy(replay ? target : BAT_CAM.target)
+      this.camZoom = replay ? zoom : BAT_CAM.zoom
+      this.camPosVel.set(0, 0, 0)
+      this.camTargetVel.set(0, 0, 0)
+      this.camZoomVel = 0
+    }
+    // Critically damped springs: no sudden starts or stops, the camera eases in and out.
+    smoothDampV(this.camPos, pos, this.camPosVel, rate, dt)
+    smoothDampV(this.camTarget, target, this.camTargetVel, rate * 0.8, dt)
+    const zr = smoothDamp(this.camZoom, zoom, this.camZoomVel, rate, dt)
+    this.camZoom = zr[0]
+    this.camZoomVel = zr[1]
+    const cp = this.camPos.clone()
+    if (this.shake > 0) {
+      this.shake -= dt
+      const s = this.shake * 0.12
+      cp.x += (Math.random() - 0.5) * s
+      cp.y += (Math.random() - 0.5) * s
+    }
+    // Match the 2D camera's framing: focal length tied to min(width, 0.72·height).
+    const f = Math.min(w, h * 0.72) * this.camZoom
+    this.camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(h / 2 / f))
+    this.camera.aspect = w / h
+    this.camera.updateProjectionMatrix()
+    this.camera.position.copy(cp)
+    this.camera.lookAt(this.camTarget)
+    // keep the shadow frustum centred on the action
+    const c = this.camTarget
+    this.key.target.position.set(c.x, 0, c.z)
+    this.key.position.set(c.x + 30, 70, c.z + 25)
+  }
+  private wasReplay = false
+
+  private updateParticles(dt: number) {
+    for (const p of this.particles) {
+      p.life += dt
+      const pos = p.pts.geometry.getAttribute('position') as THREE.BufferAttribute
+      const arr = pos.array as Float32Array
+      for (let i = 0; i < arr.length; i += 3) {
+        p.vel[i + 1] -= 9.8 * dt * 0.6
+        arr[i] += p.vel[i] * dt
+        arr[i + 1] += p.vel[i + 1] * dt
+        arr[i + 2] += p.vel[i + 2] * dt
+      }
+      pos.needsUpdate = true
+      ;(p.pts.material as THREE.PointsMaterial).opacity = clamp(1 - p.life / p.max, 0, 1)
+    }
+    const dead = this.particles.filter((p) => p.life >= p.max)
+    for (const d of dead) {
+      d.pts.removeFromParent()
+      d.pts.geometry.dispose()
+    }
+    this.particles = this.particles.filter((p) => p.life < p.max)
+  }
+}
+
+// ----------------------------------------------------------------------------- props
+
+const v = (p: { x: number; y: number; z: number }) => new THREE.Vector3(p.x, p.y, p.z)
+
+function ring(r0: number, r1: number, color: number) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(r0, r1, 32), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide }))
+  m.rotation.x = -Math.PI / 2
+  m.visible = false
+  m.renderOrder = 2
+  return m
+}
+
+/** Coloured length bands on the pitch shown while aiming a delivery. */
+function buildZones() {
+  const g = new THREE.Group()
+  const bands: [number, number, number, string][] = [
+    [0, 0.12, 0xffd23f, 'Yorker'],
+    [0.12, 0.38, 0x2bd17e, 'Full'],
+    [0.38, 0.65, 0x1aa7ff, 'Good'],
+    [0.65, 1.0, 0xff5a5a, 'Short'],
+  ].map(([a, b, c, n]) => [a as number, b as number, c as number, n as string])
+  const z = (len: number) => CREASE_Z - (0.35 + len * 8.6)
+  for (const [a, b, c] of bands) {
+    const z0 = z(a)
+    const z1 = z(b)
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(2.6, Math.abs(z1 - z0)), new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.22, depthWrite: false }))
+    m.rotation.x = -Math.PI / 2
+    m.position.set(0, 0.015, (z0 + z1) / 2)
+    m.renderOrder = 1
+    g.add(m)
+  }
+  g.visible = false
+  return g
+}
+
+function buildStumps(z: number, shadows: boolean) {
+  const group = new THREE.Group()
+  const wood = new THREE.MeshStandardMaterial({ color: 0xf2e6c9, roughness: 0.5 })
+  const parts: THREE.Mesh[] = []
+  for (const x of [-0.115, 0, 0.115]) {
+    const s = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, STUMP_H, 8), wood)
+    s.position.set(x, STUMP_H / 2, z)
+    s.castShadow = shadows
+    group.add(s)
+    parts.push(s)
+  }
+  for (const x of [-0.0575, 0.0575]) {
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.11, 6), wood)
+    b.rotation.z = Math.PI / 2
+    b.position.set(x, STUMP_H + 0.01, z)
+    group.add(b)
+    parts.push(b)
+  }
+  // remember rest transforms
+  for (const p of parts) p.userData.rest = { pos: p.position.clone(), rot: p.rotation.clone() }
+  return { group, parts, z }
+}
+
+function breakStumps(s: { parts: THREE.Mesh[] }, u: number) {
+  for (let i = 0; i < s.parts.length; i++) {
+    const p = s.parts[i]
+    const rest = p.userData.rest as { pos: THREE.Vector3; rot: THREE.Euler }
+    if (u < 0) {
+      p.position.copy(rest.pos)
+      p.rotation.copy(rest.rot)
+      continue
+    }
+    const k = Math.min(u, 1.2)
+    if (i < 3) {
+      // stumps cartwheel back
+      const lean = Math.min(1.25, k * (2.5 + i * 0.6))
+      p.rotation.set(-lean, 0, (i - 1) * 0.25 * k)
+      p.position.set(rest.pos.x + (i - 1) * 0.12 * k, rest.pos.y - Math.sin(lean) * 0.2, rest.pos.z + Math.sin(lean) * 0.3)
+    } else {
+      // bails fly
+      const vx = i === 3 ? -1.4 : 1.6
+      p.position.set(rest.pos.x + vx * k, Math.max(0.01, rest.pos.y + 3.2 * k - 4.9 * k * k), rest.pos.z + 1.4 * k)
+      p.rotation.set(k * 14, k * 9, rest.rot.z)
+    }
+  }
+}
+
+function skyTexture() {
+  const c = document.createElement('canvas')
+  c.width = 4
+  c.height = 256
+  const g = c.getContext('2d')!
+  const grd = g.createLinearGradient(0, 0, 0, 256)
+  grd.addColorStop(0, '#02040d')
+  grd.addColorStop(0.5, '#0b1838')
+  grd.addColorStop(1, '#1d3566')
+  g.fillStyle = grd
+  g.fillRect(0, 0, 4, 256)
+  const t = new THREE.CanvasTexture(c)
+  t.colorSpace = THREE.SRGBColorSpace
+  return t
+}

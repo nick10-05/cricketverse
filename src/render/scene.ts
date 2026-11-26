@@ -104,7 +104,9 @@ export class Scene {
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
-    this.ctx = canvas.getContext('2d')!
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('2D canvas unavailable')
+    this.ctx = ctx
     const colors = ['#e94b4b', '#f5c542', '#3fb6ff', '#ffffff', '#ff8a3d', '#7a5cff', '#2bd17e', '#ff5fa2', '#1a2238', '#d9d9d9']
     let seed = 7
     const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
@@ -157,10 +159,10 @@ export class Scene {
   }
 
   /** Live batting: register a swing now and return the full shot input. */
-  swing(dir: number, loft: boolean): ShotInput | null {
+  swing(dir: number, loft: boolean, now = performance.now()): ShotInput | null {
     const p = this.play
     if (!p || !p.opts.live || p.shot) return null
-    const t = this.flightTime()
+    const t = this.flightTime(now)
     if (t < 0.05) return null // swinging during run-up is ignored
     const timing = (t - p.tr.tContact) * 1000
     p.shot = { swung: true, dir, loft, timing }
@@ -183,6 +185,13 @@ export class Scene {
     const tr = p.tr
     if (o.path.length) p.resultAt = tr.tContact + pathEnd(o.path)
     else p.resultAt = o.wicket === 'bowled' ? tr.tStumps + 0.05 : tr.tStumps + 0.25
+  }
+
+  /** For the batting timing bar: where the live ball is relative to the contact moment. */
+  timingProbe(now = performance.now()) {
+    const p = this.play
+    if (!p || !p.opts.live) return null
+    return { t: this.flightTime(now), tContact: p.tr.tContact, d: p.d, shot: p.shot }
   }
 
   isBusy() {
@@ -240,7 +249,9 @@ export class Scene {
     if (W < 10 || H < 10) return
 
     const p = this.play
-    const t = p ? this.flightTime(now) : -99
+    const rawT = p ? this.flightTime(now) : -99
+    // same brisk post-contact playback as the 3D view
+    const t = p && rawT > p.tr.tContact ? p.tr.tContact + (rawT - p.tr.tContact) * 1.25 : rawT
     const state = this.computeState(p, t)
 
     // camera
@@ -273,11 +284,11 @@ export class Scene {
     this.drawParticles(dt)
 
     // callbacks
-    if (p) this.tick(p, t)
+    if (p) this.tick(p, t, rawT)
   }
 
-  private tick(p: Play, t: number) {
-    if (p.opts.live && !p.shot && !p.noSwingFired && t > p.tr.tContact + 0.2) {
+  private tick(p: Play, t: number, rawT: number) {
+    if (p.opts.live && !p.shot && !p.noSwingFired && rawT > p.tr.tContact + 0.32) {
       p.noSwingFired = true
       p.shot = { swung: false, dir: 0, loft: false, timing: 0 }
       p.opts.onNoSwing?.()
@@ -295,7 +306,7 @@ export class Scene {
       else if (o.wicket) this.burst('wicket')
       p.opts.onResult?.(o)
     }
-    if (p.resultFired && !p.doneFired && t >= (p.resultAt ?? 0) + 2.0) {
+    if (p.resultFired && !p.doneFired && t >= (p.resultAt ?? 0) + 1.1) {
       p.doneFired = true
       const cb = p.opts.onDone
       this.play = null

@@ -133,7 +133,7 @@ export function adBoardTexture() {
     { bg: '#ff6a1f', fg: '#fff', text: 'CRICKETVERSE' },
     { bg: '#0e1530', fg: '#ffd23f', text: 'ARENA' },
     { bg: '#1aa7ff', fg: '#fff', text: 'PLAY WITH FRIENDS' },
-    { bg: '#0e1530', fg: '#2bd17e', text: '1 – 10 OVERS' },
+    { bg: '#0e1530', fg: '#2bd17e', text: '1v1 TO 11v11' },
   ]
   const w = 2048 / ads.length
   ads.forEach((a, i) => {

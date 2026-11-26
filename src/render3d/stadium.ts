@@ -47,7 +47,7 @@ export function buildStadium(quality: 'high' | 'medium' | 'low'): Stadium {
 
   // ---------------------------------------------------------------- LED boards
   const adTex = adBoardTexture()
-  adTex.repeat.set(10, 1)
+  adTex.repeat.set(-10, 1) // negative: the boards are seen from inside the cylinder
   const boards = new THREE.Mesh(
     new THREE.CylinderGeometry(BOUNDARY_R + 5, BOUNDARY_R + 5, 1.1, 160, 1, true),
     new THREE.MeshStandardMaterial({ map: adTex, emissiveMap: adTex, emissive: 0xffffff, emissiveIntensity: 0.85, side: THREE.BackSide, roughness: 0.4 }),
