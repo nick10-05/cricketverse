@@ -2,6 +2,7 @@ import Peer, { type DataConnection } from 'peerjs'
 import { io, type Socket } from 'socket.io-client'
 import type { LobbyState, MatchSettings, MatchState } from '../game/types'
 import { BrowserHost, DEFAULT_SETTINGS } from './host'
+import { canStartLobby } from '../game/room'
 import { type ClientMsg, type HostMsg, makeId, PEER_PREFIX, type PeerHello, type ServerJoinAck } from './protocol'
 
 export type GameEvent = Extract<HostMsg, { t: 'ball' } | { t: 'replay' }>
@@ -195,15 +196,24 @@ export class RoomClient {
     this.set({ status: 'connecting', error: null })
     try {
       const s = await this.connectServer()
+      // Listen before asking: the lobby can arrive right alongside the ack.
+      this.bindSocket(s)
       const ack: ServerJoinAck = await s.timeout(5000).emitWithAck('join', { code, pid: this.snap.myId, name: this.name })
       if (ack.ok) {
-        this.bindSocket(s)
         this.set({ transport: 'server' })
         return
       }
       s.close()
+      this.socket = null
+      // The server knows the room but refused us (locked / full): don't fall back to peer-to-peer.
+      if (ack.error && ack.error !== 'Room not found') {
+        this.set({ status: 'error', error: ack.error })
+        return
+      }
     } catch {
       /* server unreachable: try peer-to-peer */
+      this.socket?.close()
+      this.socket = null
     }
     this.joinPeer(code)
   }
@@ -244,12 +254,7 @@ export class RoomClient {
   canStart(): string | null {
     const L = this.snap.lobby
     if (!L) return 'Not connected'
-    const size = L.settings.mode === 'team' ? null : Number(L.settings.mode[0])
-    const a = L.players.filter((p) => p.team === 'A').length
-    const b = L.players.filter((p) => p.team === 'B').length
-    if (size !== null && (a !== size || b !== size)) return `Each team needs ${size} player${size > 1 ? 's' : ''} (add bots to fill)`
-    if (a < 1 || b < 1) return 'Both teams need at least one player'
-    return null
+    return canStartLobby(L)
   }
 
   leave() {

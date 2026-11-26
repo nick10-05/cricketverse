@@ -18,6 +18,7 @@ import { type ClientMsg, type HostMsg, makeCode, type ServerJoinAck } from '../s
 const PORT = Number(process.env.PORT ?? 3001)
 const DIST = resolve(fileURLToPath(new URL('.', import.meta.url)), '..', 'dist')
 const ROOM_IDLE_MS = 10 * 60 * 1000
+const MAX_ROOMS = Number(process.env.MAX_ROOMS ?? 500)
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -109,6 +110,17 @@ const str = (v: unknown, max: number) => String(v ?? '').slice(0, max)
 io.on('connection', (socket) => {
   let code: string | null = null
   let pid: string | null = null
+  // Token bucket: 20 messages/second sustained, bursts of 40.
+  let tokens = 40
+  let last = Date.now()
+  const allow = (cost = 1) => {
+    const now = Date.now()
+    tokens = Math.min(40, tokens + ((now - last) / 1000) * 20)
+    last = now
+    if (tokens < cost) return false
+    tokens -= cost
+    return true
+  }
 
   const bind = (c: string, p: string) => {
     const e = rooms.get(c)!
@@ -124,11 +136,12 @@ io.on('connection', (socket) => {
   socket.on('create', (data: { pid: string; name: string; settings?: MatchSettings }, ack: (a: ServerJoinAck) => void) => {
     if (typeof ack !== 'function') return
     const p = str(data?.pid, 24)
-    if (!p) return ack({ ok: false, error: 'bad request' })
+    if (!p || !allow(5)) return ack({ ok: false, error: 'bad request' })
+    if (rooms.size >= MAX_ROOMS) return ack({ ok: false, error: 'Server is full, try again soon' })
     const c = makeRoom(p, str(data?.name, 16), { ...DEFAULT_SETTINGS, ...(data?.settings ?? {}) })
     bind(c, p)
-    rooms.get(c)!.room.pushLobby()
     ack({ ok: true, code: c })
+    rooms.get(c)!.room.pushLobby()
   })
 
   socket.on('join', (data: { code: string; pid: string; name: string }, ack: (a: ServerJoinAck) => void) => {
@@ -137,13 +150,15 @@ io.on('connection', (socket) => {
     const p = str(data?.pid, 24)
     const e = rooms.get(c)
     if (!e || !p) return ack({ ok: false, error: 'Room not found' })
+    const err = e.room.join(p, str(data?.name, 16))
+    if (err) return ack({ ok: false, error: err })
     bind(c, p)
-    e.room.join(p, str(data?.name, 16))
     ack({ ok: true, code: c })
+    e.room.pushLobby()
   })
 
   socket.on('msg', (msg: ClientMsg) => {
-    if (!code || !pid) return
+    if (!code || !pid || !allow()) return
     const e = rooms.get(code)
     if (!e) return
     e.room.handle(pid, msg)

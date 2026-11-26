@@ -4,6 +4,7 @@ export type ClientMsg =
   | { t: 'setTeam'; team: TeamId | null }
   | { t: 'settings'; settings: MatchSettings }
   | { t: 'addBot'; team: TeamId }
+  | { t: 'fillBots' }
   | { t: 'kick'; pid: string }
   | { t: 'start' }
   | { t: 'bowl'; delivery: Delivery }

@@ -33,7 +33,8 @@ export class BrowserHost {
 
   openOffline() {
     this.room.lobby.code = 'SOLO'
-    this.room.addBot('B')
+    this.room.fillBots()
+    if (!this.room.lobby.players.some((p) => p.team === 'B')) this.room.addBot('B')
     this.room.pushLobby()
   }
 
@@ -73,8 +74,14 @@ export class BrowserHost {
         pid = String(msg.pid).slice(0, 24)
         const old = this.conns.get(pid)
         if (old && old !== conn) old.close()
+        const err = this.room.join(pid, msg.name)
+        if (err) {
+          conn.send({ t: 'error', text: err } satisfies HostMsg)
+          setTimeout(() => conn.close(), 300)
+          pid = null
+          return
+        }
         this.conns.set(pid, conn)
-        this.room.join(pid, msg.name)
         return
       }
       if (pid) this.room.handle(pid, msg)
