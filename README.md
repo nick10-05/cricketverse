@@ -80,7 +80,9 @@ npm run build
 npm start          # PORT defaults to 3001; health check at /healthz
 ```
 
-- **Render**: [render.yaml](render.yaml) is included (works on the free plan).
+- **Render**: [render.yaml](render.yaml) is included (works on the free plan). Click the button, sign in to Render and it builds and starts the whole game for you:
+
+  [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/nick10-05/cricketverse)
 - **Docker**: `docker build -t cricketverse . && docker run -p 3001:3001 cricketverse`
 - **Any Node host** (Railway, Fly.io, a VPS): build, then `npm start`.
 
