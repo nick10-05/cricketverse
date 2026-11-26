@@ -1,21 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GameEvent, RoomClient, RoomSnapshot } from '../net/client'
-import type { BallOutcome, Delivery, DeliveryType, MatchState, ShotInput, TeamId } from '../game/types'
+import type { BallOutcome, Delivery, DeliveryType, FieldSetting, MatchState, ShotInput, TeamId } from '../game/types'
 import { CREASE_Z, DELIVERY_INFO, randomSeed, resolveBall } from '../game/physics'
-import { other, oversText, requiredRate } from '../game/rules'
+import { applyFreeHit, bowlerQuota, nonStrikerOf, other, oversText, requiredRate } from '../game/rules'
 import { Scene, TEAM_COLORS } from '../render/scene'
-import { isMuted, setMuted, sfx } from '../render/sound'
+import { detectQuality, Scene3D, type Quality } from '../render3d/Scene3D'
+import { recordMatch } from './history'
+import { crowdAmbience, isMuted, setMuted, sfx } from '../render/sound'
 import { QuickChat, Toast } from './bits'
 import { Scorecard } from './Scorecard'
+import { TimingBar } from './TimingBar'
 
 type Job = () => void
+type AnyScene = Scene | Scene3D
+const QUALITIES: (Quality | '2d')[] = ['high', 'medium', 'low', '2d']
+const FIELD_LABEL: Record<FieldSetting, string> = { attacking: 'Attack', balanced: 'Balanced', defensive: 'Defend' }
 
 const LEN_MIN = CREASE_Z - 0.35
 const LEN_RANGE = 8.6
 
 export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap: RoomSnapshot; onLeave: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const sceneRef = useRef<Scene | null>(null)
+  const sceneRef = useRef<AnyScene | null>(null)
+  const [quality, setQuality] = useState<Quality | '2d'>(() => detectQuality())
+  const [replaying, setReplaying] = useState(false)
   const live = useRef<{ ballId: number; delivery: Delivery; sent: boolean } | null>(null)
   const queue = useRef<Job[]>([])
   const myBalls = useRef(new Set<number>())
@@ -38,11 +46,20 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
   // ------------------------------------------------------------- scene
   useEffect(() => {
-    const s = new Scene(canvasRef.current!)
+    let s: AnyScene
+    try {
+      s = quality === '2d' ? new Scene(canvasRef.current!) : new Scene3D(canvasRef.current!, quality)
+    } catch {
+      s = new Scene(canvasRef.current!) // WebGL unavailable: fall back to the 2D renderer
+    }
+    if (s instanceof Scene3D) s.onReplay = setReplaying
     sceneRef.current = s
-    if (import.meta.env.DEV) (window as unknown as { __scene: Scene }).__scene = s
+    s.batting = inn.batting
+    s.bowling = other(inn.batting)
+    if (import.meta.env.DEV) (window as unknown as { __scene: AnyScene }).__scene = s
     return () => s.destroy()
-  }, [])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quality])
 
   useEffect(() => {
     const s = sceneRef.current
@@ -50,6 +67,39 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
     s.batting = inn.batting
     s.bowling = other(inn.batting)
   }, [inn.batting])
+
+  // Hide the non-striker when the batter is batting alone (1-player side / last man stands).
+  const hasPartner = inn.nonStriker >= 0
+  useEffect(() => {
+    const s = sceneRef.current
+    if (s instanceof Scene3D) s.partner = hasPartner
+  }, [hasPartner, quality])
+
+  // Crowd murmur while the match screen is open.
+  useEffect(() => {
+    const start = () => crowdAmbience(true)
+    window.addEventListener('pointerdown', start, { once: true })
+    window.addEventListener('keydown', start, { once: true })
+    if (!isMuted()) crowdAmbience(true)
+    return () => {
+      window.removeEventListener('pointerdown', start)
+      window.removeEventListener('keydown', start)
+      crowdAmbience(false)
+    }
+  }, [])
+
+  // Live score on the stadium's big screen.
+  useEffect(() => {
+    const s = sceneRef.current
+    if (!(s instanceof Scene3D)) return
+    const r = requiredRate(inn, shown.settings.overs)
+    s.setScoreboard(`${inn.runs}/${inn.wickets}`, r ? `NEED ${Math.max(0, r.need)} OFF ${r.balls}` : `${shown.settings.teamNames[inn.batting].toUpperCase()} · ${oversText(inn.balls)} OV`, TEAM_COLORS[inn.batting].main)
+  }, [inn, shown.settings, quality])
+
+  // Save finished matches to the local history.
+  useEffect(() => {
+    if (match.phase === 'done' && match.result) recordMatch(match, myId)
+  }, [match, myId])
 
   // ------------------------------------------------------------- playback queue
   const runNext = useCallback(() => {
@@ -87,9 +137,15 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
   const onResult = useCallback((o: BallOutcome) => {
     const kind = o.boundary === 6 ? 'six' : o.boundary === 4 ? 'four' : o.wicket ? 'out' : o.runs > 0 ? 'runs' : 'dot'
     setLabel({ text: o.label, kind, key: Date.now() })
-    if (o.boundary) sfx.cheer(o.boundary === 6)
+    if (o.boundary) {
+      sfx.cheer(o.boundary === 6)
+      sfx.drums(o.boundary === 6 ? 10 : 6)
+      if (o.boundary === 6) sfx.horn()
+      crowdAmbience(true, 0.3)
+      setTimeout(() => crowdAmbience(true, 0.12), 3000)
+    }
     else if (o.wicket) {
-      if (o.wicket === 'bowled') sfx.stumps()
+      if (o.wicket === 'bowled' || o.wicket === 'stumped' || o.wicket === 'run out') sfx.stumps()
       sfx.cheer(false)
     } else if (!o.path.length && o.grade !== 'none') sfx.whoosh()
     if (!o.path.length && o.grade === 'miss') setGrade({ text: 'MISSED', key: Date.now() })
@@ -107,7 +163,8 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       const s = sceneRef.current
       if (!L || L.sent || !s) return
       L.sent = true
-      const o = resolveBall(L.delivery, shot)
+      const m = client.snap.match
+      const o = m ? applyFreeHit(m, resolveBall(L.delivery, shot)) : resolveBall(L.delivery, shot)
       s.setOutcome(o)
       client.send({ t: 'shot', ballId: L.ballId, shot })
     },
@@ -168,6 +225,11 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
   // ------------------------------------------------------------- bowling
   const [dtype, setDtype] = useState<DeliveryType>('fast')
+  const [field, setField] = useState<FieldSetting>('balanced')
+  useEffect(() => {
+    const s = sceneRef.current
+    if (s instanceof Scene3D && !s.isBusy()) s.field = field
+  }, [field, quality])
   const [turnDir, setTurnDir] = useState<1 | -1>(1)
   const meterRef = useRef<HTMLDivElement>(null)
   const meterVal = useRef(0)
@@ -209,11 +271,12 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       power,
       turn: turnDir,
       seed: randomSeed(),
+      field,
     }
     sfx.click()
     setBowledFor(match.ballId)
     client.send({ t: 'bowl', delivery })
-  }, [canBowl, dtype, turnDir, client, match.ballId])
+  }, [canBowl, dtype, turnDir, client, match.ballId, field])
 
   // ------------------------------------------------------------- input
   const dragging = useRef(false)
@@ -225,15 +288,31 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
     s.aim = { x: Math.max(-1.3, Math.min(1.3, g.x)), z: Math.max(LEN_MIN - LEN_RANGE, Math.min(LEN_MIN, g.z)) }
   }
 
+  const getScene = useCallback(() => sceneRef.current, [])
+
   const doSwing = useCallback(
-    (dir: number, lofted: boolean) => {
+    (dir: number, lofted: boolean, at?: number) => {
       const s = sceneRef.current
       if (!s) return
-      const shot = s.swing(dir, lofted)
+      const shot = s.swing(dir, lofted, at)
       if (shot) finishLive(shot)
     },
     [finishLive],
   )
+
+  // Touch batting: a tap swings at once; a swipe picks the direction (and up = lofted).
+  // The swing is timed from the moment the finger went down.
+  const press = useRef<{ x: number; y: number; at: number; tapDir: number; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const releasePress = (x: number, y: number) => {
+    const pr = press.current
+    if (!pr) return
+    press.current = null
+    clearTimeout(pr.timer)
+    const dx = x - pr.x
+    const dy = y - pr.y
+    if (Math.hypot(dx, dy) > 34) doSwing(Math.max(-1, Math.min(1, dx / 110)), dy < -30 || loftRef.current, pr.at)
+    else doSwing(pr.tapDir, loftRef.current, pr.at)
+  }
 
   const onPointerDown = (e: React.PointerEvent) => {
     sfx.unlock()
@@ -244,12 +323,20 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       aimAt(e.clientX, e.clientY)
       return
     }
+    if (replaying && s instanceof Scene3D) {
+      s.skipReplay()
+      return
+    }
     if (liveBatting) {
       const r = canvasRef.current!.getBoundingClientRect()
       const bs = s.batterScreen()
       const bx = bs ? bs.x : r.width / 2
       const dir = Math.max(-1, Math.min(1, (e.clientX - r.left - bx) / (r.width * 0.26)))
-      doSwing(dir, loftRef.current)
+      const at = performance.now()
+      if (press.current) clearTimeout(press.current.timer)
+      const ex = e.clientX
+      const ey = e.clientY
+      press.current = { x: ex, y: ey, at, tapDir: dir, timer: setTimeout(() => releasePress(ex, ey), 120) }
     }
   }
 
@@ -297,6 +384,11 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
   const striker = shown.turn?.striker ?? null
   const bowler = shown.turn?.bowler ?? null
   const sStat = striker ? inn.batters[striker] : undefined
+  const nonStriker = nonStrikerOf(shown, inn)
+  const nsStat = nonStriker ? inn.batters[nonStriker] : undefined
+  const meP = snap.lobby?.players.find((p) => p.id === myId)
+  const spectating = !!meP?.spectator || !(['A', 'B'] as TeamId[]).some((t) => match.teams[t].includes(myId))
+  const quota = bowlerQuota(shown, bowlTeam)
   const bStat = bowler ? inn.bowlers[bowler] : undefined
   const rr = requiredRate(inn, shown.settings.overs)
   const waitingText =
@@ -311,8 +403,11 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       : ''
 
   return (
-    <div className="fixed inset-0 overflow-hidden select-none bg-ink touch-none">
-      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" onPointerDown={onPointerDown} onPointerMove={(e) => dragging.current && canBowl && aimAt(e.clientX, e.clientY)} onPointerUp={() => (dragging.current = false)} />
+    <div className="fixed inset-0 overflow-hidden select-none bg-ink touch-none" onPointerLeave={() => press.current && releasePress(press.current.x, press.current.y)}>
+      <canvas key={quality} ref={canvasRef} className="absolute inset-0 w-full h-full" onPointerDown={onPointerDown} onPointerMove={(e) => dragging.current && canBowl && aimAt(e.clientX, e.clientY)} onPointerUp={(e) => {
+          dragging.current = false
+          releasePress(e.clientX, e.clientY)
+        }} />
       <Toast text={snap.toast} />
 
       {/* Scoreboard */}
@@ -344,23 +439,39 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
               {inn.thisOver.map((b, i) => (
                 <BallChip key={i} v={b} />
               ))}
-              {Array.from({ length: Math.max(0, 6 - inn.thisOver.filter((b) => b !== 'Wd').length) }, (_, i) => (
+              {Array.from({ length: Math.max(0, 6 - inn.thisOver.filter((b) => !/Wd|Nb/.test(b)).length) }, (_, i) => (
                 <div key={'e' + i} className="h-6 w-6 rounded-full border border-white/15" />
               ))}
             </div>
           </div>
           <div className="flex gap-2 pointer-events-auto">
             <button
-              className="h-full aspect-square rounded-2xl bg-black/60 border border-white/10 text-lg"
+              className="h-full w-10 sm:w-auto sm:aspect-square shrink-0 rounded-2xl bg-black/60 border border-white/10 text-base sm:text-lg"
               onClick={() => {
                 setMuted(!muted)
                 setMutedState(!muted)
+                if (muted) crowdAmbience(true)
               }}
               title="Sound"
             >
               {muted ? '🔇' : '🔊'}
             </button>
-            <button className="h-full aspect-square rounded-2xl bg-black/60 border border-white/10 text-lg" onClick={() => setConfirmLeave(true)} title="Leave">
+            <button
+              className="h-full shrink-0 rounded-2xl bg-black/60 border border-white/10 px-1.5 sm:px-2 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider"
+              onClick={() => {
+                const next = QUALITIES[(QUALITIES.indexOf(quality) + 1) % QUALITIES.length]
+                try {
+                  localStorage.setItem('cvx-quality', next)
+                } catch {
+                  /* ignore */
+                }
+                setQuality(next)
+              }}
+              title="Graphics quality"
+            >
+              {quality === '2d' ? '2D' : quality === 'medium' ? 'MED' : quality}
+            </button>
+            <button className="h-full w-10 sm:w-auto sm:aspect-square shrink-0 rounded-2xl bg-black/60 border border-white/10 text-base sm:text-lg" onClick={() => setConfirmLeave(true)} title="Leave">
               ✕
             </button>
           </div>
@@ -373,14 +484,25 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
         <div className="mx-auto max-w-3xl mt-1.5 flex justify-between text-[11px] sm:text-xs text-white/85">
           {striker && (
             <div className="rounded-full bg-black/55 px-2.5 py-1">
-              🏏 <b>{names[striker]}</b> {sStat?.runs ?? 0}
+              🏏 <b>{names[striker]}*</b> {sStat?.runs ?? 0}
               <span className="text-white/50">({sStat?.balls ?? 0})</span>
+              {nonStriker && (
+                <span className="text-white/60">
+                  {' '}
+                  · {names[nonStriker]} {nsStat?.runs ?? 0}
+                  <span className="text-white/40">({nsStat?.balls ?? 0})</span>
+                </span>
+              )}
             </div>
           )}
+          {inn.freeHit && <div className="rounded-full bg-gold text-ink font-bold px-2.5 py-1 animate-pulse">FREE HIT</div>}
           {bowler && (
             <div className="rounded-full bg-black/55 px-2.5 py-1" style={{ boxShadow: `inset 0 0 0 1px ${TEAM_COLORS[bowlTeam].main}55` }}>
               ⚾ <b>{names[bowler]}</b> {bStat?.wickets ?? 0}-{bStat?.runs ?? 0}
-              <span className="text-white/50"> ({oversText(bStat?.balls ?? 0)})</span>
+              <span className="text-white/50">
+                {' '}
+                ({oversText(bStat?.balls ?? 0)}/{quota})
+              </span>
             </div>
           )}
         </div>
@@ -388,12 +510,28 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
       <QuickChat client={client} chat={snap.chat} />
 
+      {replaying && (
+        <div className="absolute top-28 right-3 z-20 pointer-events-none flex items-center gap-2 rounded-lg bg-red-600/90 px-3 py-1 font-display text-xl tracking-widest shadow-lg">
+          <span className="h-2 w-2 rounded-full bg-white animate-pulse" /> REPLAY
+          <span className="text-[10px] font-sans tracking-normal opacity-80">tap to skip</span>
+        </div>
+      )}
+      {spectating && (
+        <div className="absolute top-28 left-3 z-20 pointer-events-none rounded-lg bg-black/60 border border-white/10 px-3 py-1 text-xs font-semibold tracking-wider">
+          👀 SPECTATING
+        </div>
+      )}
+
       {/* Result label */}
       {label && (
         <div key={label.key} className="absolute inset-x-0 top-[22%] z-20 text-center pointer-events-none animate-pop">
           <div
-            className={`font-display text-stroke tracking-wider leading-none ${label.kind === 'six' ? 'text-[110px] sm:text-[150px] text-gold' : label.kind === 'four' ? 'text-[96px] sm:text-[130px] text-tide' : label.kind === 'out' ? 'text-[80px] sm:text-[110px] text-red-500' : 'text-6xl sm:text-7xl text-white'}`}
-            style={{ textShadow: '0 6px 30px rgba(0,0,0,0.6)' }}
+            className={`font-display text-stroke tracking-wider leading-none px-2 ${label.kind === 'six' ? 'text-gold' : label.kind === 'four' ? 'text-tide' : label.kind === 'out' ? 'text-red-500' : 'text-white'}`}
+            style={{
+              textShadow: '0 6px 30px rgba(0,0,0,0.6)',
+              // big and punchy, but always fits on one line
+              fontSize: `min(${label.kind === 'six' ? 150 : label.kind === 'four' ? 130 : label.kind === 'out' ? 110 : 72}px, ${Math.min(30, 150 / Math.max(1, label.text.length))}vw)`,
+            }}
           >
             {label.text}
           </div>
@@ -407,7 +545,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
       {/* Waiting banner */}
       {waitingText && (
-        <div className={`absolute inset-x-0 ${iAmStriker ? "bottom-32" : "bottom-8"} z-20 text-center pointer-events-none`}>
+        <div className={`absolute inset-x-0 ${iAmStriker ? "top-28 sm:top-32" : "bottom-8"} z-20 text-center pointer-events-none`}>
           <span className="inline-block rounded-full bg-black/65 border border-white/10 px-5 py-2.5 text-sm sm:text-base animate-rise">
             <span className="inline-block h-2 w-2 rounded-full bg-gold mr-2 animate-pulse" />
             {waitingText}
@@ -426,9 +564,13 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
             </div>
           )}
           <div className="flex justify-between items-end max-w-xl mx-auto">
-            <div className="text-xs text-white/60 max-w-[55%] leading-snug bg-black/40 rounded-xl px-3 py-2">
-              Tap left · middle · right of the batter as the ball arrives. Keys: ← ↑ →
-            </div>
+            {liveBatting ? (
+              <TimingBar scene={getScene} />
+            ) : (
+              <div className="text-xs text-white/60 max-w-[55%] leading-snug bg-black/40 rounded-xl px-3 py-2">
+                Tap left · middle · right of the batter as the ball arrives, or swipe (swipe up to loft). Keys: ← ↑ →
+              </div>
+            )}
             <button
               className={`pointer-events-auto rounded-2xl px-5 py-3 font-display text-2xl tracking-widest border-2 transition ${loft ? 'bg-gold text-ink border-gold shadow-[0_0_24px_rgba(255,210,63,0.6)]' : 'bg-black/50 border-white/25 text-white/80'}`}
               onPointerDown={(e) => {
@@ -451,7 +593,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
               <div className="font-display text-2xl tracking-wide">Your over · bowl</div>
               <div className="text-xs text-white/55">Drag the red target on the pitch</div>
             </div>
-            <div className="grid grid-cols-6 gap-1.5">
+            <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
               {(Object.keys(DELIVERY_INFO) as DeliveryType[]).map((t) => (
                 <button
                   key={t}
@@ -463,15 +605,23 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
                 </button>
               ))}
             </div>
-            {(dtype === 'swing' || dtype === 'spin') && (
+            {(dtype === 'swing' || dtype === 'spin' || dtype === 'seam') && (
               <div className="flex gap-1.5 mt-2">
                 {([1, -1] as const).map((d) => (
                   <button key={d} onClick={() => setTurnDir(d)} className={`flex-1 rounded-lg py-1 text-xs font-semibold ${turnDir === d ? 'bg-white text-ink' : 'bg-white/5 text-white/70'}`}>
-                    {dtype === 'swing' ? (d === 1 ? 'Out-swing →' : '← In-swing') : d === 1 ? 'Turn to off →' : '← Turn to leg'}
+                    {dtype === 'swing' ? (d === 1 ? 'Out-swing →' : '← In-swing') : dtype === 'seam' ? (d === 1 ? 'Seam away →' : '← Seam in') : d === 1 ? 'Turn to off →' : '← Turn to leg'}
                   </button>
                 ))}
               </div>
             )}
+            <div className="flex items-center gap-1.5 mt-2">
+              <span className="text-[11px] uppercase tracking-wider text-white/50 mr-1">Field</span>
+              {(['attacking', 'balanced', 'defensive'] as FieldSetting[]).map((f) => (
+                <button key={f} onClick={() => setField(f)} className={`flex-1 rounded-lg py-1 text-xs font-semibold ${field === f ? 'bg-tide text-white' : 'bg-white/5 text-white/70'}`}>
+                  {FIELD_LABEL[f]}
+                </button>
+              ))}
+            </div>
             <div className="mt-3 flex items-center gap-3">
               <div className="relative h-9 flex-1 rounded-full overflow-hidden" style={{ background: 'linear-gradient(90deg,#ff3b3b,#ffb21f 30%,#2bd17e 45%,#2bd17e 55%,#ffb21f 70%,#ff3b3b)' }}>
                 <div ref={meterRef} className="absolute top-0 bottom-0 w-1.5 -ml-[3px] bg-white shadow-[0_0_12px_#fff]" />
@@ -493,7 +643,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
           </div>
           <div className="text-white/75 mt-1">and chose to {match.innings[0].batting === match.tossWinner ? 'bat' : 'bowl'} first</div>
           <div className="mt-4 text-sm text-white/50">
-            {match.settings.overs} over{match.settings.overs > 1 ? 's' : ''} · {match.settings.wickets} wicket{match.settings.wickets > 1 ? 's' : ''}
+            {match.settings.overs} over{match.settings.overs > 1 ? 's' : ''} · {match.maxWickets?.[match.innings[0].batting] ?? match.settings.wickets} wicket{(match.maxWickets?.[match.innings[0].batting] ?? match.settings.wickets) > 1 ? 's' : ''} · {match.teams.A.length}v{match.teams.B.length}
           </div>
         </Overlay>
       )}
@@ -582,8 +732,8 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
 function BallChip({ v }: { v: string }) {
   const cls =
-    v === 'W' ? 'bg-red-500 text-white' : v === '6' ? 'bg-gold text-ink' : v === '4' ? 'bg-tide text-white' : v === 'Wd' ? 'bg-white/20 text-white text-[9px]' : v === '0' ? 'bg-white/10 text-white/70' : 'bg-white text-ink'
-  return <div className={`h-6 w-6 rounded-full grid place-items-center text-xs font-bold ${cls}`}>{v === '0' ? '•' : v}</div>
+    v === 'W' ? 'bg-red-500 text-white' : v === '6' ? 'bg-gold text-ink' : v === '4' ? 'bg-tide text-white' : /Wd|Nb|B|Lb/.test(v) ? 'bg-white/20 text-white text-[8px]' : v === '0' ? 'bg-white/10 text-white/70' : 'bg-white text-ink'
+  return <div className={`h-6 min-w-6 px-0.5 rounded-full grid place-items-center text-xs font-bold ${cls}`}>{v === '0' ? '•' : v}</div>
 }
 
 function Overlay({ children }: { children: React.ReactNode }) {

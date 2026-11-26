@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { DEFAULT_SETTINGS } from '../net/host'
-import type { MatchSettings } from '../game/types'
+import type { GameMode, MatchSettings } from '../game/types'
+import { defaultWickets } from '../game/rules'
+import { career, clearHistory, loadHistory } from './history'
 import { Scene } from '../render/scene'
 
 type Action = { kind: 'create' } | { kind: 'join'; code: string } | { kind: 'practice'; settings: MatchSettings }
@@ -18,7 +20,8 @@ export function Home({ inviteCode, onStart }: { inviteCode: string; onStart: (na
   const [name, setName] = useState(savedName)
   const [code, setCode] = useState(inviteCode)
   const [overs, setOvers] = useState(2)
-  const [tab, setTab] = useState<'play' | 'how'>('play')
+  const [side, setSide] = useState(1)
+  const [tab, setTab] = useState<'play' | 'how' | 'stats'>('play')
 
   useEffect(() => {
     const s = new Scene(canvasRef.current!)
@@ -55,13 +58,13 @@ export function Home({ inviteCode, onStart }: { inviteCode: string; onStart: (na
 
         <div className="w-full max-w-md mt-8 glass rounded-3xl p-5 sm:p-6 animate-rise" style={{ animationDelay: '80ms' }}>
           <div className="flex gap-1 p-1 rounded-2xl bg-black/30 mb-5">
-            {(['play', 'how'] as const).map((t) => (
+            {(['play', 'stats', 'how'] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
                 className={`flex-1 rounded-xl py-2 text-sm font-semibold transition ${tab === t ? 'bg-white text-ink' : 'text-white/70'}`}
               >
-                {t === 'play' ? 'Play' : 'How to play'}
+                {t === 'play' ? 'Play' : t === 'stats' ? 'My stats' : 'How to play'}
               </button>
             ))}
           </div>
@@ -109,32 +112,109 @@ export function Home({ inviteCode, onStart }: { inviteCode: string; onStart: (na
                   </div>
                   <button
                     className="btn-ghost rounded-xl px-4 py-2 text-sm font-semibold"
-                    onClick={() => go({ kind: 'practice', settings: { ...DEFAULT_SETTINGS, overs, teamNames: { A: name.trim() || 'You', B: 'Bots' } } })}
+                    onClick={() => go({ kind: 'practice', settings: { ...DEFAULT_SETTINGS, mode: `${side}v${side}` as GameMode, wickets: defaultWickets(side), overs, teamNames: { A: name.trim() || 'You', B: 'Bots' } } })}
                   >
                     Play
                   </button>
                 </div>
                 <div className="flex gap-1 mt-3">
-                  {[1, 2, 3, 5].map((o) => (
+                  {[1, 2, 3, 5, 10, 20].map((o) => (
                     <button
                       key={o}
                       onClick={() => setOvers(o)}
                       className={`flex-1 rounded-lg py-1.5 text-sm font-semibold ${overs === o ? 'bg-gold text-ink' : 'bg-white/5 text-white/70'}`}
                     >
-                      {o} over{o > 1 ? 's' : ''}
+                      {o} ov
+                    </button>
+                  ))}
+                </div>
+                <div className="flex gap-1 mt-1.5">
+                  {[1, 2, 3, 5, 11].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setSide(n)}
+                      className={`flex-1 rounded-lg py-1.5 text-sm font-semibold ${side === n ? 'bg-tide text-white' : 'bg-white/5 text-white/70'}`}
+                    >
+                      {n}v{n}
                     </button>
                   ))}
                 </div>
               </div>
             </>
+          ) : tab === 'stats' ? (
+            <Stats />
           ) : (
             <HowTo />
           )}
         </div>
         <p className="mt-6 text-xs text-white/40 text-center max-w-sm">
-          Rooms are private and peer-to-peer: only friends with your code can join. 1v1 up to 5v5, or split any number of players into two teams.
+          Rooms are private: only friends with your code can join. Anything from 1v1 to 11v11, 1 to 30 overs.
         </p>
       </div>
+    </div>
+  )
+}
+
+function Stats() {
+  const [list, setList] = useState(loadHistory)
+  const c = career(list)
+  const tiles: [string, string][] = [
+    ['Matches', String(c.matches)],
+    ['Won', String(c.wins)],
+    ['Win %', c.matches ? `${Math.round((c.wins / c.matches) * 100)}%` : '-'],
+    ['Runs', String(c.runs)],
+    ['Best', String(c.best)],
+    ['Strike rate', c.balls ? ((c.runs / c.balls) * 100).toFixed(0) : '-'],
+    ['Wickets', String(c.wickets)],
+    ['Economy', c.bowled ? ((c.conceded / c.bowled) * 6).toFixed(1) : '-'],
+    ['Avg score', c.matches ? (c.runs / c.matches).toFixed(1) : '-'],
+  ]
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-2">
+        {tiles.map(([k, val]) => (
+          <div key={k} className="rounded-xl bg-black/25 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-white/45">{k}</div>
+            <div className="font-display text-3xl leading-none mt-0.5">{val}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-4 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-widest text-white/55">Recent matches</div>
+        {list.length > 0 && (
+          <button
+            className="text-xs text-white/40 underline"
+            onClick={() => {
+              clearHistory()
+              setList([])
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </div>
+      <div className="mt-2 space-y-2 max-h-72 overflow-y-auto pr-1">
+        {list.length === 0 && <div className="text-sm text-white/45 rounded-xl bg-black/20 p-4 text-center">No matches yet. Play one and it shows up here.</div>}
+        {list.map((r) => (
+          <div key={r.at} className="rounded-xl bg-black/25 px-3 py-2">
+            <div className="flex justify-between text-[11px] text-white/45">
+              <span>
+                {new Date(r.at).toLocaleDateString()} · {r.mode === 'team' ? 'Teams' : r.mode} · {r.overs} ov
+              </span>
+              {r.me?.won === true && <span className="text-emerald-300 font-semibold">WON</span>}
+              {r.me?.won === false && <span className="text-red-300 font-semibold">LOST</span>}
+            </div>
+            <div className="text-sm font-semibold mt-0.5">{r.result}</div>
+            <div className="text-[11px] text-white/55">{r.scores.join('  ·  ')}</div>
+            {r.me && (
+              <div className="text-[11px] text-gold/90 mt-0.5">
+                You: {r.me.runs} ({r.me.balls}) · {r.me.wickets}/{r.me.conceded}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="mt-3 text-[11px] text-white/35">Stats are saved in this browser only.</p>
     </div>
   )
 }
@@ -142,10 +222,11 @@ export function Home({ inviteCode, onStart }: { inviteCode: string; onStart: (na
 function HowTo() {
   const rows = [
     ['🏏', 'Batting', 'Watch the yellow ring where the ball pitches. Tap/press the moment the ball reaches you. Tap left, middle or right of the batter to pick the direction. Turn on LOFT to go aerial: more sixes, more risk.'],
+    ['📱', 'Touch', 'Tap to hit, or swipe: the swipe direction aims the shot and swiping up lofts it. Tap during a replay to skip it.'],
     ['⏱️', 'Timing', 'PERFECT timing middles it. Early pulls it to the leg side, late steers it to the off side. Way off and you miss.'],
-    ['🎯', 'Bowling', 'Pick a delivery, drag the target on the pitch, then stop the power meter in the green zone for an accurate, quicker ball.'],
+    ['🎯', 'Bowling', 'Pick a delivery (pace, swing, seam, spin, yorker, bouncer, slower) and a field (attack, balanced, defend), drag the target on the pitch, then stop the power meter in the green. A rushed red-zone release can be a no-ball, and the next ball is a free hit.'],
     ['⌨️', 'Keyboard', 'Batting: ← ↑ → to hit, hold Shift (or L) to loft. Bowling: Space to bowl.'],
-    ['👥', 'Rooms', 'Create a room, share the code, choose 1–10 overs and 1v1, 2v2, 3v3… or Teams. Fill empty spots with bots.'],
+    ['👥', 'Rooms', 'Create a room, share the code, pick 1v1 up to 11v11 and 1–30 overs. Fill empty spots with bots. Lock the room so nobody can barge into a running match.'],
   ]
   return (
     <div className="space-y-3">

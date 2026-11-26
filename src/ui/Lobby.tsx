@@ -1,17 +1,13 @@
 import { useState } from 'react'
 import type { RoomClient, RoomSnapshot } from '../net/client'
 import type { GameMode, MatchSettings, Player, TeamId } from '../game/types'
-import { teamSizeFor } from '../game/rules'
+import { defaultWickets, MAX_OVERS, MAX_TEAM, OVER_PRESETS, teamSizeFor, wicketCap } from '../game/rules'
 import { TEAM_COLORS } from '../render/scene'
 import { QuickChat, Toast } from './bits'
 
-const MODES: { id: GameMode; label: string; sub: string }[] = [
-  { id: '1v1', label: '1v1', sub: 'Duel' },
-  { id: '2v2', label: '2v2', sub: 'Pairs' },
-  { id: '3v3', label: '3v3', sub: 'Trios' },
-  { id: '4v4', label: '4v4', sub: 'Squads' },
-  { id: '5v5', label: '5v5', sub: 'Full' },
-  { id: 'team', label: 'Teams', sub: 'Any size' },
+const MODES: { id: GameMode; label: string }[] = [
+  ...Array.from({ length: MAX_TEAM }, (_, i) => ({ id: `${i + 1}v${i + 1}` as GameMode, label: `${i + 1}v${i + 1}` })),
+  { id: 'team', label: 'Free' },
 ]
 
 export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: RoomSnapshot; onLeave: () => void }) {
@@ -22,12 +18,14 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
   const [copied, setCopied] = useState(false)
   const startError = isHost ? client.canStart() : null
   const size = teamSizeFor(s.mode)
+  const wCap = wicketCap(size ?? MAX_TEAM)
+  const customOvers = !OVER_PRESETS.includes(s.overs)
 
   const update = (patch: Partial<MatchSettings>) => {
     const next = { ...s, ...patch }
     if (patch.mode) {
-      const n = teamSizeFor(patch.mode)
-      next.wickets = n === null ? Math.max(2, Math.min(10, lobby.players.length)) : n === 1 ? 3 : Math.min(10, n + 1)
+      const n = teamSizeFor(patch.mode) ?? Math.max(1, Math.ceil(lobby.players.length / 2))
+      next.wickets = defaultWickets(n)
     }
     client.send({ t: 'settings', settings: next })
   }
@@ -97,7 +95,7 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
             </div>
             {spectators.length > 0 && (
               <div className="glass rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-widest text-white/50 mb-2">Not in a team</div>
+                <div className="text-xs uppercase tracking-widest text-white/50 mb-2">Spectators / not in a team</div>
                 <div className="flex flex-wrap gap-2">
                   {spectators.map((p) => (
                     <span key={p.id} className="rounded-full bg-white/10 px-3 py-1 text-sm">
@@ -122,17 +120,19 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
               {!isHost && <span className="text-xs text-white/50">Host decides</span>}
             </div>
             <div>
-              <Label>Mode</Label>
-              <div className="grid grid-cols-3 gap-2">
+              <Label>
+                Players per team <span className="text-gold">{size === null ? 'free split' : `${size} a side`}</span>
+              </Label>
+              <div className="grid grid-cols-6 gap-1.5">
                 {MODES.map((m) => (
                   <button
                     key={m.id}
                     disabled={!isHost}
                     onClick={() => update({ mode: m.id })}
-                    className={`rounded-xl py-2 transition ${s.mode === m.id ? 'bg-gold text-ink shadow-[0_4px_0_#b9790a]' : 'bg-white/5 text-white/80 disabled:opacity-60'}`}
+                    title={m.id === 'team' ? 'Split everyone in the room into two teams (up to 11 a side)' : undefined}
+                    className={`rounded-lg py-1.5 font-display text-lg leading-none transition ${s.mode === m.id ? 'bg-gold text-ink shadow-[0_3px_0_#b9790a]' : 'bg-white/5 text-white/80 disabled:opacity-60'}`}
                   >
-                    <div className="font-display text-2xl leading-none">{m.label}</div>
-                    <div className="text-[10px] uppercase tracking-wider opacity-70">{m.sub}</div>
+                    {m.label}
                   </button>
                 ))}
               </div>
@@ -142,7 +142,7 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
                 Overs <span className="text-gold">{s.overs}</span>
               </Label>
               <div className="grid grid-cols-5 gap-1.5">
-                {Array.from({ length: 10 }, (_, i) => i + 1).map((o) => (
+                {OVER_PRESETS.map((o) => (
                   <button
                     key={o}
                     disabled={!isHost}
@@ -152,7 +152,18 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
                     {o}
                   </button>
                 ))}
+                <div className={`rounded-lg grid place-items-center text-xs font-bold ${customOvers ? 'bg-gold text-ink' : 'bg-white/5 text-white/50'}`}>{customOvers ? s.overs : 'Custom'}</div>
               </div>
+              <input
+                type="range"
+                min={1}
+                max={MAX_OVERS}
+                value={s.overs}
+                disabled={!isHost}
+                aria-label="Custom overs"
+                onChange={(e) => update({ overs: Number(e.target.value) })}
+                className="w-full mt-3 accent-[#ffc53d]"
+              />
             </div>
             <div>
               <Label>Wickets per side</Label>
@@ -161,11 +172,26 @@ export function Lobby({ client, snap, onLeave }: { client: RoomClient; snap: Roo
                   −
                 </Step>
                 <div className="font-display text-4xl w-10 text-center">{s.wickets}</div>
-                <Step disabled={!isHost || s.wickets >= 10} onClick={() => update({ wickets: s.wickets + 1 })}>
+                <Step disabled={!isHost || s.wickets >= wCap} onClick={() => update({ wickets: s.wickets + 1 })}>
                   +
                 </Step>
+                <div className="text-[11px] leading-tight text-white/50 flex-1">
+                  {size === 1 ? 'Lives for the lone batter' : size !== null && s.wickets >= size ? 'Last man stands: the final batter bats alone' : 'All out after this many wickets'}
+                </div>
               </div>
             </div>
+            <label className="flex items-center justify-between gap-3 text-sm">
+              <span>
+                <span className="font-semibold">Lock room during match</span>
+                <span className="block text-[11px] text-white/50">Otherwise late joiners can watch as spectators</span>
+              </span>
+              <input type="checkbox" disabled={!isHost} checked={!!s.locked} onChange={(e) => update({ locked: e.target.checked })} className="h-5 w-5 accent-[#ffc53d]" />
+            </label>
+            {isHost && size !== null && lobby.players.filter((p) => p.team).length < size * 2 && (
+              <button onClick={() => client.send({ t: 'fillBots' })} className="btn-ghost w-full rounded-xl py-2 text-sm font-semibold">
+                🤖 Fill empty slots with bots
+              </button>
+            )}
             {isHost ? (
               <div>
                 <button disabled={!!startError} onClick={() => client.send({ t: 'start' })} className="btn-primary w-full rounded-2xl py-4 font-display text-3xl tracking-wider">
@@ -215,7 +241,7 @@ function TeamColumn(props: {
   const { team, players, size, isHost } = props
   const col = TEAM_COLORS[team]
   const full = size !== null && players.length >= size
-  const slots = size ?? Math.max(players.length, 1)
+  const slots = size ?? Math.min(MAX_TEAM, Math.max(players.length + 1, 1))
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(props.name)
   return (
@@ -246,8 +272,8 @@ function TeamColumn(props: {
       <div className="p-3 space-y-2">
         {Array.from({ length: slots }, (_, i) => players[i]).map((p, i) =>
           p ? (
-            <div key={p.id} className="flex items-center gap-3 rounded-xl bg-black/25 px-3 py-2.5">
-              <div className="h-9 w-9 rounded-full grid place-items-center font-bold text-sm" style={{ background: col.main }}>
+            <div key={p.id} className={`flex items-center gap-3 rounded-xl bg-black/25 px-3 ${slots > 5 ? 'py-1.5' : 'py-2.5'}`}>
+              <div className={`${slots > 5 ? 'h-7 w-7 text-xs' : 'h-9 w-9 text-sm'} rounded-full grid place-items-center font-bold`} style={{ background: col.main }}>
                 {p.isBot ? '🤖' : p.name.slice(0, 1).toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
@@ -256,7 +282,7 @@ function TeamColumn(props: {
                   {p.id === props.myId && <span className="text-gold"> (you)</span>}
                 </div>
                 <div className="text-[11px] text-white/45">
-                  {p.id === props.hostId ? 'Host' : p.isBot ? 'Bot' : p.connected ? 'Ready' : 'Reconnecting…'}
+                  #{i + 1} · {p.id === props.hostId ? 'Host' : p.isBot ? 'Bot' : p.connected ? 'Ready' : 'Reconnecting…'}
                 </div>
               </div>
               {isHost && p.id !== props.hostId && (
@@ -266,8 +292,8 @@ function TeamColumn(props: {
               )}
             </div>
           ) : (
-            <div key={`empty-${i}`} className="rounded-xl border border-dashed border-white/15 px-3 py-3 text-sm text-white/35 text-center">
-              Open slot
+            <div key={`empty-${i}`} className={`rounded-xl border border-dashed border-white/15 px-3 ${slots > 5 ? 'py-1.5' : 'py-3'} text-sm text-white/35 text-center`}>
+              Slot {i + 1} · open
             </div>
           ),
         )}
