@@ -4,6 +4,8 @@
 
 Create a room, share the 5-letter code, pick your teams and play: anything from a 1v1 duel to a full 11-a-side match, from 1 to 30 overs. No account, no download, no ads. It runs in the browser on desktop and mobile.
 
+**[▶ Play it now: cricketverse-arena.onrender.com](https://cricketverse-arena.onrender.com)** (free hosting, so the first visit after a quiet spell can take up to a minute to wake the server)
+
 Created by **[nick10-05](https://github.com/nick10-05)**.
 
 [![CI](https://github.com/nick10-05/cricketverse/actions/workflows/ci.yml/badge.svg)](https://github.com/nick10-05/cricketverse/actions/workflows/ci.yml)
