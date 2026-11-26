@@ -2,19 +2,52 @@ import type { BallOutcome, Innings, MatchSettings, MatchState, TeamId } from './
 
 export const other = (t: TeamId): TeamId => (t === 'A' ? 'B' : 'A')
 
+export const MAX_TEAM = 11
+export const MAX_OVERS = 30
+export const OVER_PRESETS = [1, 2, 3, 5, 10, 15, 20, 25, 30]
+
 export function teamSizeFor(mode: MatchSettings['mode']): number | null {
-  return mode === 'team' ? null : Number(mode[0])
+  if (mode === 'team') return null
+  const n = parseInt(mode, 10)
+  return Number.isFinite(n) ? Math.max(1, Math.min(MAX_TEAM, n)) : 1
 }
 
-function newInnings(batting: TeamId, target: number | null): Innings {
+export function isMode(v: unknown): v is MatchSettings['mode'] {
+  if (v === 'team') return true
+  if (typeof v !== 'string') return false
+  const m = /^(\d{1,2})v(\d{1,2})$/.exec(v)
+  return !!m && m[1] === m[2] && +m[1] >= 1 && +m[1] <= MAX_TEAM
+}
+
+/** Most wickets a side can be given: lives for a lone batter, otherwise the whole team ("last man stands"). */
+export function wicketCap(teamSize: number) {
+  return teamSize <= 1 ? 10 : teamSize
+}
+
+/** A sensible default number of wickets for a team size. */
+export function defaultWickets(teamSize: number) {
+  if (teamSize <= 1) return 3
+  if (teamSize <= 5) return teamSize // last man stands in small teams
+  return teamSize - 1
+}
+
+function newInnings(batting: TeamId, size: number, target: number | null): Innings {
   return {
     batting,
     runs: 0,
     wickets: 0,
     balls: 0,
     extras: 0,
-    strikerIdx: 0,
+    striker: 0,
+    nonStriker: size > 1 ? 1 : -1,
+    nextBat: Math.min(2, size),
     bowlerIdx: 0,
+    lastBowler: -1,
+    freeHit: false,
+    fours: 0,
+    sixes: 0,
+    overRuns: [],
+    fallOfWickets: [],
     thisOver: [],
     batters: {},
     bowlers: {},
@@ -29,26 +62,28 @@ export function createMatch(
   tossWinner: TeamId,
   batFirst: TeamId,
 ): MatchState {
+  const cap = (t: TeamId) => Math.max(1, Math.min(settings.wickets, wicketCap(teams[t].length)))
   const m: MatchState = {
     phase: 'playing',
     settings,
     teams,
     names,
     tossWinner,
-    innings: [newInnings(batFirst, null)],
+    innings: [newInnings(batFirst, teams[batFirst].length, null)],
     current: 0,
     ballId: 0,
     turn: null,
     result: null,
     lastOutcome: null,
     startedAt: Date.now(),
+    maxWickets: { A: cap('A'), B: cap('B') },
   }
   m.turn = nextTurn(m)
   return m
 }
 
 export function maxWickets(m: MatchState, batting: TeamId) {
-  return m.settings.wickets || m.teams[batting].length
+  return m.maxWickets?.[batting] ?? m.settings.wickets
 }
 
 export function currentInnings(m: MatchState) {
@@ -57,12 +92,23 @@ export function currentInnings(m: MatchState) {
 
 export function strikerOf(m: MatchState, inn: Innings) {
   const team = m.teams[inn.batting]
-  return team[inn.strikerIdx % team.length]
+  return team[inn.striker % team.length]
+}
+
+export function nonStrikerOf(m: MatchState, inn: Innings): string | null {
+  if (inn.nonStriker < 0) return null
+  const team = m.teams[inn.batting]
+  return team[inn.nonStriker % team.length]
 }
 
 export function bowlerOf(m: MatchState, inn: Innings) {
   const team = m.teams[other(inn.batting)]
   return team[inn.bowlerIdx % team.length]
+}
+
+/** Most overs one bowler may bowl: overs shared out evenly across the side. */
+export function bowlerQuota(m: MatchState, bowlingTeam: TeamId) {
+  return Math.ceil(m.settings.overs / Math.max(1, m.teams[bowlingTeam].length))
 }
 
 function nextTurn(m: MatchState): MatchState['turn'] {
@@ -77,8 +123,18 @@ export function oversText(balls: number) {
 
 export function ballSymbol(o: BallOutcome) {
   if (o.wicket) return 'W'
-  if (o.extra === 'wide') return 'Wd'
+  if (o.extra === 'wide') return o.runs > 1 ? `${o.runs}Wd` : 'Wd'
+  if (o.extra === 'noball') return o.runs > 1 ? `Nb+${o.runs - 1}` : 'Nb'
+  if (o.extra === 'bye') return `${o.runs}B`
+  if (o.extra === 'legbye') return `${o.runs}Lb`
   return String(o.runs)
+}
+
+/** Free hit protects against every dismissal except a run out. */
+export function applyFreeHit(m: MatchState, o: BallOutcome): BallOutcome {
+  const inn = currentInnings(m)
+  if (!inn?.freeHit || !o.wicket || o.wicket === 'run out') return o
+  return { ...o, wicket: null, label: 'FREE HIT · NOT OUT', runs: o.wicket === 'caught' || o.wicket === 'caught behind' ? 0 : o.runs }
 }
 
 /** Apply a resolved ball to the match. Pure: returns a new state. */
@@ -88,48 +144,100 @@ export function applyBall(prev: MatchState, o: BallOutcome): MatchState {
   const striker = strikerOf(m, inn)
   const bowler = bowlerOf(m, inn)
   const bs = (inn.batters[striker] ??= { runs: 0, balls: 0, fours: 0, sixes: 0, out: null })
-  const bw = (inn.bowlers[bowler] ??= { balls: 0, runs: 0, wickets: 0 })
+  const ns = nonStrikerOf(m, inn)
+  if (ns) inn.batters[ns] ??= { runs: 0, balls: 0, fours: 0, sixes: 0, out: null }
+  const bw = (inn.bowlers[bowler] ??= { balls: 0, runs: 0, wickets: 0, dots: 0, extras: 0 })
 
   m.ballId += 1
   m.lastOutcome = o
   inn.runs += o.runs
-  bw.runs += o.runs
   inn.thisOver.push(ballSymbol(o))
 
-  if (o.extra === 'wide') {
-    inn.extras += o.runs
-  } else {
+  const legal = o.extra !== 'wide' && o.extra !== 'noball'
+  const extraRuns = o.extra === 'wide' ? o.runs : o.extra === 'noball' ? 1 : o.extra === 'bye' || o.extra === 'legbye' ? o.runs : 0
+  const batRuns = o.runs - extraRuns
+  inn.extras += extraRuns
+  // Byes and leg byes don't count against the bowler.
+  bw.runs += o.extra === 'bye' || o.extra === 'legbye' ? 0 : o.runs
+  if (o.extra === 'wide' || o.extra === 'noball') bw.extras = (bw.extras ?? 0) + 1
+
+  if (o.extra !== 'wide') {
+    bs.balls += legal ? 1 : 0
+    bs.runs += batRuns
+    if (o.boundary === 4 && !o.extra) {
+      bs.fours += 1
+      inn.fours += 1
+    }
+    if (o.boundary === 6 && !o.extra) {
+      bs.sixes += 1
+      inn.sixes += 1
+    }
+  }
+  if (legal) {
     inn.balls += 1
     bw.balls += 1
-    bs.balls += 1
-    bs.runs += o.runs
-    if (o.boundary === 4) bs.fours += 1
-    if (o.boundary === 6) bs.sixes += 1
+    if (o.runs === 0 && !o.wicket) bw.dots = (bw.dots ?? 0) + 1
   }
+  inn.freeHit = o.extra === 'noball'
+
+  // Strike rotates on odd runs actually run (a wide's penalty run isn't run).
+  const ran = o.extra === 'wide' ? o.runs - 1 : o.extra === 'noball' ? o.runs - 1 : o.boundary ? 0 : o.runs
+  if (ran % 2 === 1 && inn.nonStriker >= 0) [inn.striker, inn.nonStriker] = [inn.nonStriker, inn.striker]
 
   if (o.wicket) {
     inn.wickets += 1
-    bw.wickets += 1
-    bs.out = `${o.wicket} b ${m.names[bowler] ?? '?'}`
-    inn.strikerIdx += 1
+    if (o.wicket !== 'run out') bw.wickets += 1
+    const how =
+      o.wicket === 'bowled' ? `b ${m.names[bowler] ?? '?'}` :
+      o.wicket === 'lbw' ? `lbw b ${m.names[bowler] ?? '?'}` :
+      o.wicket === 'caught' ? `c & b ${m.names[bowler] ?? '?'}` :
+      o.wicket === 'caught behind' ? `c †keeper b ${m.names[bowler] ?? '?'}` :
+      o.wicket === 'stumped' ? `st †keeper b ${m.names[bowler] ?? '?'}` : 'run out'
+    // A run out after odd runs catches the batter who has just crossed to the far end; keep it simple: the striker of the ball.
+    const outIdx = ran % 2 === 1 && inn.nonStriker >= 0 ? inn.nonStriker : inn.striker
+    const outId = m.teams[inn.batting][outIdx % m.teams[inn.batting].length]
+    const os = (inn.batters[outId] ??= { runs: 0, balls: 0, fours: 0, sixes: 0, out: null })
+    os.out = how
+    os.outs = (os.outs ?? 0) + 1
+    inn.fallOfWickets.push({ runs: inn.runs, balls: inn.balls, batter: outId })
+    const size = m.teams[inn.batting].length
+    if (size > 1) {
+      const replaceStriker = outIdx === inn.striker
+      if (inn.nextBat < size) {
+        if (replaceStriker) inn.striker = inn.nextBat
+        else inn.nonStriker = inn.nextBat
+        inn.nextBat += 1
+      } else {
+        // Last man stands: the survivor bats alone.
+        if (replaceStriker) inn.striker = inn.nonStriker
+        inn.nonStriker = -1
+      }
+    }
   }
 
-  const overDone = o.extra !== 'wide' && inn.balls % 6 === 0
+  const overDone = legal && inn.balls % 6 === 0
   const totalBalls = m.settings.overs * 6
   const allOut = inn.wickets >= maxWickets(m, inn.batting)
   const chased = inn.target !== null && inn.runs >= inn.target
   const oversUp = inn.balls >= totalBalls
 
+  if (overDone) inn.overRuns.push(inn.runs)
   if (allOut || chased || oversUp) {
+    if (!overDone) inn.overRuns.push(inn.runs)
     if (m.current === 0) {
       m.phase = 'break'
-      m.innings.push(newInnings(other(inn.batting), inn.runs + 1))
+      const chasing = other(inn.batting)
+      m.innings.push(newInnings(chasing, m.teams[chasing].length, inn.runs + 1))
       m.current = 1
     } else {
       m.phase = 'done'
       m.result = decide(m)
     }
   } else if (overDone) {
+    // New over: change ends and hand the ball to the next bowler (never the same one twice running).
+    if (inn.nonStriker >= 0) [inn.striker, inn.nonStriker] = [inn.nonStriker, inn.striker]
+    const nb = m.teams[other(inn.batting)].length
+    inn.lastBowler = inn.bowlerIdx % nb
     inn.bowlerIdx += 1
     inn.thisOver = []
   }

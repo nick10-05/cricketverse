@@ -6,19 +6,26 @@ export interface Player {
   team: TeamId | null
   isBot?: boolean
   connected: boolean
+  /** Disconnected mid-match: a bot is playing for them until they return. */
+  away?: boolean
+  spectator?: boolean
 }
 
-/** 1v1 … 5v5 are fixed team sizes; 'team' lets everyone in the room split freely. */
-export type GameMode = '1v1' | '2v2' | '3v3' | '4v4' | '5v5' | 'team'
+/** '1v1' … '11v11' are fixed team sizes; 'team' lets everyone in the room split freely (up to 11 a side). */
+export type GameMode = `${number}v${number}` | 'team'
 
 export interface MatchSettings {
   mode: GameMode
-  overs: number // 1..10
-  wickets: number // 1..10
+  overs: number // 1..30
+  /** Wickets per side. Clamped to the team size (1-player teams get "lives", up to 10). */
+  wickets: number
   teamNames: Record<TeamId, string>
+  /** Reject new joiners while a match is running (otherwise they watch as spectators). */
+  locked?: boolean
 }
 
-export type DeliveryType = 'fast' | 'swing' | 'spin' | 'yorker' | 'bouncer' | 'slower'
+export type DeliveryType = 'fast' | 'swing' | 'seam' | 'spin' | 'yorker' | 'bouncer' | 'slower'
+export type FieldSetting = 'attacking' | 'balanced' | 'defensive'
 
 export interface Delivery {
   type: DeliveryType
@@ -31,6 +38,8 @@ export interface Delivery {
   /** Swing / spin direction: -1 or 1. */
   turn: number
   seed: number
+  /** Field placement chosen by the bowler. */
+  field?: FieldSetting
 }
 
 export interface ShotInput {
@@ -66,10 +75,12 @@ export type ShotType =
   | 'cut'
   | 'upper cut'
 
+export type WicketType = 'bowled' | 'caught' | 'caught behind' | 'run out' | 'lbw' | 'stumped'
+
 export interface BallOutcome {
   runs: number
-  extra: null | 'wide'
-  wicket: null | 'bowled' | 'caught' | 'caught behind' | 'run out'
+  extra: null | 'wide' | 'noball' | 'bye' | 'legbye'
+  wicket: null | WicketType
   grade: TimingGrade
   label: string
   boundary: null | 4 | 6
@@ -93,12 +104,16 @@ export interface BatterStat {
   fours: number
   sixes: number
   out: string | null
+  /** Dismissals (for 1-player teams batting on "lives"). */
+  outs?: number
 }
 
 export interface BowlerStat {
   balls: number
   runs: number
   wickets: number
+  dots?: number
+  extras?: number
 }
 
 export interface Innings {
@@ -107,8 +122,19 @@ export interface Innings {
   wickets: number
   balls: number
   extras: number
-  strikerIdx: number
+  /** Indexes into the batting team's list. nonStriker is -1 when batting alone. */
+  striker: number
+  nonStriker: number
+  nextBat: number
   bowlerIdx: number
+  /** Index of the bowler of the previous over (no one bowls two in a row). */
+  lastBowler: number
+  freeHit: boolean
+  fours: number
+  sixes: number
+  /** Runs at the end of each over, for the run-rate chart. */
+  overRuns: number[]
+  fallOfWickets: { runs: number; balls: number; batter: string }[]
   thisOver: string[]
   batters: Record<string, BatterStat>
   bowlers: Record<string, BowlerStat>
@@ -129,6 +155,8 @@ export interface MatchState {
   result: { winner: TeamId | null; text: string } | null
   lastOutcome: BallOutcome | null
   startedAt: number
+  /** Wickets that end an innings, per batting team. */
+  maxWickets: Record<TeamId, number>
 }
 
 export interface LobbyState {
@@ -137,4 +165,14 @@ export interface LobbyState {
   players: Player[]
   settings: MatchSettings
   inMatch: boolean
+}
+
+export interface MatchRecord {
+  at: number
+  teamNames: Record<TeamId, string>
+  scores: string[]
+  result: string
+  overs: number
+  mode: GameMode
+  me?: { name: string; runs: number; balls: number; wickets: number; conceded: number; bowled: number; won: boolean | null }
 }

@@ -1,4 +1,4 @@
-import type { BallOutcome, Delivery, DeliveryType, PathPoint, ShotInput, ShotType, TimingGrade } from './types'
+import type { BallOutcome, Delivery, DeliveryType, FieldSetting, PathPoint, ShotInput, ShotType, TimingGrade } from './types'
 
 /*
  * World coordinates (metres):
@@ -34,6 +34,7 @@ const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v))
 export const DELIVERY_INFO: Record<DeliveryType, { label: string; speed: number; desc: string; difficulty: number }> = {
   fast: { label: 'Fast', speed: 39, desc: 'Raw pace', difficulty: 0.95 },
   swing: { label: 'Swing', speed: 35, desc: 'Curves in the air', difficulty: 0.9 },
+  seam: { label: 'Seam', speed: 36, desc: 'Jags off the pitch', difficulty: 0.88 },
   spin: { label: 'Spin', speed: 23, desc: 'Turns off the pitch', difficulty: 1.1 },
   yorker: { label: 'Yorker', speed: 37, desc: 'Full at the toes', difficulty: 0.72 },
   bouncer: { label: 'Bouncer', speed: 37, desc: 'Short & rising', difficulty: 0.85 },
@@ -82,7 +83,8 @@ export function trajectory(d: Delivery): Trajectory {
   const vx0 = (bounceX - releaseX - 0.5 * swingA * tBounce * tBounce) / tBounce
   let vx1 = vx0 + swingA * tBounce * 0.6
   if (d.type === 'spin') vx1 += d.turn * (1.1 + 0.9 * p)
-  else vx1 += (r() - 0.5) * 0.5 // seam movement
+  else if (d.type === 'seam') vx1 += d.turn * (0.9 + 0.8 * p) * (0.6 + r() * 0.6) // sharp movement off the seam
+  else vx1 += (r() - 0.5) * 0.5 // natural seam movement
 
   const pos = (t: number) => {
     if (t <= tBounce) {
@@ -125,7 +127,7 @@ export interface Fielder {
   role: string
 }
 
-export const FIELDERS: Fielder[] = [
+const BALANCED: Fielder[] = [
   { x: 0, z: 3.2, speed: 5, role: 'Keeper' },
   { x: 1.2, z: -15, speed: 6, role: 'Bowler' },
   { x: 9, z: -30, speed: 7, role: 'Mid-off' },
@@ -138,6 +140,40 @@ export const FIELDERS: Fielder[] = [
   { x: -20, z: -60, speed: 7.5, role: 'Long-on' },
   { x: -32, z: 32, speed: 7.5, role: 'Fine leg' },
 ]
+
+/** Close-in catchers: more edges carried, but gaps in the deep. */
+const ATTACKING: Fielder[] = [
+  { x: 0, z: 3.2, speed: 5, role: 'Keeper' },
+  { x: 1.2, z: -15, speed: 6, role: 'Bowler' },
+  { x: 7, z: -24, speed: 7, role: 'Mid-off' },
+  { x: -7, z: -24, speed: 7, role: 'Mid-on' },
+  { x: 2.6, z: 4.2, speed: 6.5, role: 'Slip' },
+  { x: 4.2, z: 3.4, speed: 6.5, role: 'Gully' },
+  { x: 14, z: -6, speed: 7.2, role: 'Cover point' },
+  { x: -3.4, z: -3.6, speed: 6.5, role: 'Short leg' },
+  { x: -18, z: -12, speed: 7.2, role: 'Midwicket' },
+  { x: 26, z: 30, speed: 7.5, role: 'Third man' },
+  { x: -28, z: 26, speed: 7.5, role: 'Fine leg' },
+]
+
+/** Sweepers on the rope: boundaries are hard to find, singles are easy. */
+const DEFENSIVE: Fielder[] = [
+  { x: 0, z: 3.2, speed: 5, role: 'Keeper' },
+  { x: 1.2, z: -15, speed: 6, role: 'Bowler' },
+  { x: 16, z: -64, speed: 7.5, role: 'Long-off' },
+  { x: -16, z: -64, speed: 7.5, role: 'Long-on' },
+  { x: 44, z: -34, speed: 7.5, role: 'Deep cover' },
+  { x: 52, z: -2, speed: 7.5, role: 'Deep point' },
+  { x: -52, z: -4, speed: 7.5, role: 'Deep square' },
+  { x: -44, z: -38, speed: 7.5, role: 'Deep midwicket' },
+  { x: 30, z: 36, speed: 7.5, role: 'Third man' },
+  { x: 11, z: -28, speed: 7.2, role: 'Mid-off' },
+  { x: -32, z: 32, speed: 7.5, role: 'Fine leg' },
+]
+
+export const FIELDS: Record<FieldSetting, Fielder[]> = { attacking: ATTACKING, balanced: BALANCED, defensive: DEFENSIVE }
+export const FIELDERS = BALANCED
+export const fieldFor = (d: Pick<Delivery, 'field'>) => FIELDS[d.field ?? 'balanced'] ?? BALANCED
 
 export function timingWindows(d: Delivery) {
   const k = DELIVERY_INFO[d.type].difficulty * (1.12 - 0.22 * clamp(d.power, 0, 1))
@@ -164,6 +200,29 @@ export function resolveBall(d: Delivery, shot: ShotInput): BallOutcome {
   const grade = gradeTiming(d, shot)
   const onStumps = Math.abs(tr.xAtStumps) < STUMP_HALF_W + 0.04 && tr.yAtStumps < STUMP_H + 0.04
   const isWide = Math.abs(tr.xAtStumps) > 1.05 || tr.yAtContact > 2.1
+  const fielders = fieldFor(d)
+  // Front-foot no-ball: a badly rushed release oversteps the crease.
+  const rx = rng(d.seed ^ 0x51ed27)
+  const noBall = d.power < 0.22 && rx() < 0.55
+  const out = resolveLegal(d, shot, tr, r, rx, grade, onStumps, isWide, fielders)
+  if (!noBall || out.extra === 'wide') return out
+  // Only a run out stands on a no-ball; the batter keeps any runs plus the penalty run.
+  const keep = out.wicket === 'run out' ? out.wicket : null
+  const runs = (out.extra ? 0 : out.runs) + 1
+  return { ...out, extra: 'noball', wicket: keep, runs, label: keep ? 'RUN OUT · NO BALL' : out.runs && !out.extra ? `NO BALL · ${out.label}` : 'NO BALL · FREE HIT' }
+}
+
+function resolveLegal(
+  d: Delivery,
+  shot: ShotInput,
+  tr: Trajectory,
+  r: () => number,
+  rx: () => number,
+  grade: TimingGrade,
+  onStumps: boolean,
+  isWide: boolean,
+  fielders: Fielder[],
+): BallOutcome {
 
   const cls = classifyShot(d, shot)
   const base: BallOutcome = {
@@ -184,8 +243,22 @@ export function resolveBall(d: Delivery, shot: ShotInput): BallOutcome {
   }
 
   const missed = (): BallOutcome => {
-    if (onStumps) return { ...base, wicket: 'bowled', label: 'BOWLED!' }
-    if (isWide) return { ...base, extra: 'wide', runs: 1, label: 'WIDE' }
+    if (onStumps) {
+      // Struck on the pad in front of the stumps before reaching them: leg before wicket.
+      const padHigh = tr.yAtContact < 0.75 && Math.abs(tr.xAtContact) < STUMP_HALF_W + 0.1
+      if (padHigh && rx() < (cls.footwork === 'front' ? 0.5 : 0.3)) return { ...base, wicket: 'lbw', label: 'LBW!' }
+      return { ...base, wicket: 'bowled', label: 'BOWLED!' }
+    }
+    if (isWide) {
+      const four = d.type !== 'spin' && Math.abs(tr.xAtStumps) > 1.6 && rx() < 0.3 ? 4 : 0
+      return { ...base, extra: 'wide', runs: 1 + four, label: four ? 'WIDE · 4 BYES' : 'WIDE' }
+    }
+    // Charged down the pitch to a spinner and missed: the keeper whips the bails off.
+    if (d.type === 'spin' && shot.swung && shot.loft && rx() < 0.4) return { ...base, wicket: 'stumped', label: 'STUMPED!' }
+    // Keeper fumbles a quick one, or it deflects off the pad.
+    const roll = rx()
+    if (roll < (d.type === 'spin' || d.type === 'slower' ? 0.03 : 0.07)) return { ...base, extra: 'bye', runs: roll < 0.012 ? 4 : 1, label: roll < 0.012 ? '4 BYES' : 'BYE' }
+    if (Math.abs(tr.xAtContact) < 0.35 && tr.yAtContact < 0.8 && roll > 0.9) return { ...base, extra: 'legbye', runs: 1, label: 'LEG BYE' }
     return { ...base, label: shot.swung ? 'BEATEN!' : 'LEFT ALONE' }
   }
 
@@ -205,9 +278,11 @@ export function resolveBall(d: Delivery, shot: ShotInput): BallOutcome {
   const edgeChance = (grade === 'early' || grade === 'late' ? 0.2 : 0.02) + (q < 0.45 ? 0.2 : 0)
   if (r() < edgeChance) {
     if (r() < 0.32 && onStumps) return { ...base, wicket: 'bowled', edged: true, label: 'PLAYED ON!' }
-    if (r() < 0.42) {
+    // Slips and gully (attacking field) hold more edges than the keeper alone.
+    const slips = fielders.some((f) => f.role === 'Slip')
+    if (r() < (slips ? 0.55 : 0.42)) {
       const path: PathPoint[] = []
-      const kp = FIELDERS[0]
+      const kp = fielders[0]
       for (let i = 0; i <= 8; i++) {
         const u = i / 8
         path.push({ t: u * 0.35, x: bx + (kp.x + 0.6 - bx) * u, y: 0.8 + 0.4 * u, z: CONTACT_Z + (kp.z - CONTACT_Z) * u })
@@ -216,7 +291,7 @@ export function resolveBall(d: Delivery, shot: ShotInput): BallOutcome {
     }
     // Thick edge down to third man / fine leg.
     const ang = (shot.timing > 0 ? 1 : -1) * (130 + r() * 30)
-    return simulateHit(base, { ...base, edged: true }, bx, tr.yAtContact, ang, 14 + r() * 12, 6 + r() * 6, r, 'EDGED')
+    return simulateHit(fielders, { ...base, edged: true }, bx, tr.yAtContact, ang, 14 + r() * 12, 6 + r() * 6, r, 'EDGED')
   }
 
   const skew = clamp(shot.timing / 140, -1, 1) * 24
@@ -230,7 +305,7 @@ export function resolveBall(d: Delivery, shot: ShotInput): BallOutcome {
   const skied = shot.loft && r() < 0.35 - 0.3 * q
   let launch = shot.loft ? (skied ? 52 + r() * 18 : 26 + (1 - q) * 22 + r() * 8) : -5 + (1 - q) * 5 + r() * 3
   if (base.shot === 'upper cut') launch += 8
-  return simulateHit(base, { ...base }, bx, tr.yAtContact, angle, exitV, launch, r, '')
+  return simulateHit(fielders, { ...base }, bx, tr.yAtContact, angle, exitV, launch, r, '')
 }
 
 /** Which shot the batter plays, from the ball's length/line and the chosen direction. */
@@ -252,7 +327,7 @@ export function classifyShot(d: Delivery, shot: ShotInput): { shot: ShotType; fo
 }
 
 function simulateHit(
-  _base: BallOutcome,
+  FIELDERS: Fielder[],
   out: BallOutcome,
   x0: number,
   y0: number,
@@ -334,9 +409,13 @@ function simulateHit(
       const d = Math.hypot(x - f.x, z - f.z)
       const airborne = !bounced && y > 0.15
       if (airborne) {
-        if (y < 3.0 && y > 0.45 && d <= run + 1.9) {
+        if (!reached[i] && y < 3.0 && y > 0.45 && d <= run + 1.9) {
           const margin = run + 1.9 - d
-          const p = margin > 2.5 ? 0.88 : margin > 1 ? 0.62 : 0.38
+          // Boundary riders take fewer clean catches (judging the ball on the rope is hard).
+          const deep = distFromCenter(f.x, f.z) > 42 ? 0.5 : 1
+          // ...and a long running catch is harder than one that comes straight to hand.
+          const chase = d > 8 ? clamp(1.1 - d / 32, 0.25, 1) : 1
+          const p = (margin > 2.5 ? 0.8 : margin > 1 ? 0.5 : 0.28) * deep * chase
           if (r() < p) {
             path.push({ t, x, y, z })
             return {
@@ -353,7 +432,7 @@ function simulateHit(
         }
       } else if (y < 1.2 && d <= run + 1.3 * clamp(16 / Math.max(1, Math.hypot(vx, vz)), 0.35, 1) && !reached[i]) {
         path.push({ t, x, y, z })
-        return withRuns(out, path, i, x, z, t, tag, r, d > run + 0.35)
+        return withRuns(FIELDERS, out, path, i, x, z, t, tag, r, d > run + 0.35)
       }
     }
 
@@ -371,10 +450,10 @@ function simulateHit(
         }
       }
       path.push({ t: Math.max(t, bestT), x, y, z })
-      return withRuns(out, path, best, x, z, Math.max(t, bestT), tag, r, false)
+      return withRuns(FIELDERS, out, path, best, x, z, Math.max(t, bestT), tag, r, false)
     }
   }
-  return withRuns(out, path, 1, x, z, t, tag, r, false)
+  return withRuns(FIELDERS, out, path, 1, x, z, t, tag, r, false)
 }
 
 function fielderRun(f: Fielder, x: number, z: number, t: number): PathPoint[] {
@@ -388,7 +467,7 @@ function fielderRun(f: Fielder, x: number, z: number, t: number): PathPoint[] {
 const RUN_FIRST = 2.0
 const RUN_NEXT = 2.6
 
-function withRuns(out: BallOutcome, path: PathPoint[], fi: number, x: number, z: number, t: number, tag: string, r: () => number, dive: boolean): BallOutcome {
+function withRuns(FIELDERS: Fielder[], out: BallOutcome, path: PathPoint[], fi: number, x: number, z: number, t: number, tag: string, r: () => number, dive: boolean): BallOutcome {
   // Throw to whichever end is nearer the fielder.
   const toStriker = Math.hypot(x, z - CREASE_Z) <= Math.hypot(x, z + PITCH_LEN - 1.22)
   const end = toStriker ? { x: 0.25, z: 1.0 } : { x: 0.3, z: -PITCH_LEN - 0.6 }
@@ -412,7 +491,7 @@ function withRuns(out: BallOutcome, path: PathPoint[], fi: number, x: number, z:
 
   // Risky extra run: close call at the stumps.
   const spare = total - RUN_FIRST - Math.max(0, runs - 1) * RUN_NEXT
-  if (runs < 3 && spare > RUN_NEXT - 0.35 && dThrow < 45 && r() < 0.45) {
+  if (runs < 3 && spare > RUN_NEXT - 0.3 && dThrow < 38 && r() < 0.28) {
     return {
       ...out,
       runs,
