@@ -18,7 +18,7 @@ Created by **[nick10-05](https://github.com/nick10-05)**.
 **Play with friends**
 - Private rooms with an invite code or link. Only people with the code can join.
 - **1v1 up to 11v11**, or a free split of everyone in the room. Empty slots fill with bots.
-- **Overs**: presets of 1, 2, 3, 5, 10, 15, 20, 25 or 30, or any custom number from 1 to 30.
+- **Overs**: presets of 1, 2, 3, 5, 10, 15, 20, 25 or 30, or any custom number from 1 to 30. Set the wickets per side too.
 - See every slot, teammate and opponent in the lobby. Rename teams, kick players, fill with bots.
 - Lock the room during a match, or let late joiners watch as spectators.
 - Drop out mid-match and a bot plays your turns until you reconnect. The host role passes on automatically.
@@ -62,7 +62,7 @@ npm run server     # game server on http://localhost:3001 (Socket.IO)
 npm run dev        # the game on http://localhost:3000
 ```
 
-Open http://localhost:3000. To test multiplayer on one machine, open a second window (or a private window) and join the room code.
+Open http://localhost:3000. To test multiplayer on one machine, open a second window (or a private window) and join the room code. Keep both windows visible side by side: browsers pause animation in background tabs, so a hidden player's screen waits until you switch back to it.
 
 No `.env` file or API keys are needed. See [.env.example](.env.example) for the optional settings.
 
@@ -105,14 +105,14 @@ For the full walkthrough (the life of one ball, disconnects and bots, server pro
 
 | Path | What |
 |---|---|
-| `src/game/` | Physics, rules, AI and the authoritative `Room` (shared by server and browser), plus unit tests |
+| `src/game/` | Physics, rules, AI, ball pacing and the authoritative `Room` (shared by server and browser), plus unit tests |
 | `src/net/` | Room client (server, peer-to-peer and local transports) and message types |
 | `server/` | Node server: Socket.IO rooms, rate limiting, static hosting |
 | `src/render3d/` | Three.js renderer: stadium, procedural cricketers, animations, camera director, replays |
 | `src/render/` | 2D canvas fallback renderer and the sound engine |
 | `public/audio/` | Short CC0 sound clips (see THIRD_PARTY_NOTICES.md) |
 | `src/ui/` | React screens: home, lobby, game, scorecard, stats |
-| `scripts/smoke-server.ts` | End-to-end test: two bots play a full match through a running server |
+| `scripts/smoke-server.ts` | End-to-end test: two scripted players create a room and play a full match through a running server |
 | `legacy/` | The previous version of the project (not built) |
 
 ## Checks
