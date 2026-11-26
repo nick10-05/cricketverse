@@ -5,6 +5,7 @@ import { CREASE_Z, DELIVERY_INFO, randomSeed, resolveBall } from '../game/physic
 import { applyFreeHit, bowlerQuota, nonStrikerOf, other, oversText, requiredRate } from '../game/rules'
 import { Scene, TEAM_COLORS } from '../render/scene'
 import { detectQuality, Scene3D, type Quality } from '../render3d/Scene3D'
+import { ScoreTicker } from './ScoreTicker'
 import { recordMatch } from './history'
 import { crowdAmbience, isMuted, setMuted, sfx } from '../render/sound'
 import { QuickChat, Toast } from './bits'
@@ -145,9 +146,11 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
       setTimeout(() => crowdAmbience(true, 0.12), 3000)
     }
     else if (o.wicket) {
-      if (o.wicket === 'bowled' || o.wicket === 'stumped' || o.wicket === 'run out') sfx.stumps()
-      sfx.cheer(false)
-    } else if (!o.path.length && o.grade !== 'none') sfx.whoosh()
+      // the 3D view plays the stumps exactly as they break
+      if (!(sceneRef.current instanceof Scene3D) && (o.wicket === 'bowled' || o.wicket === 'stumped' || o.wicket === 'run out')) sfx.stumps()
+      sfx.cheer(true)
+    } else if (o.runs > 0 && !o.extra) sfx.clap(Math.min(1, o.runs * 0.3))
+    else if (!o.path.length && o.grade !== 'none') sfx.whoosh()
     if (!o.path.length && o.grade === 'miss') setGrade({ text: 'MISSED', key: Date.now() })
   }, [])
 
@@ -418,10 +421,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
               {shown.settings.teamNames[inn.batting]}
             </div>
             <div className="px-3 py-1.5 flex items-center gap-3">
-              <div className="font-display text-3xl sm:text-4xl leading-none">
-                {inn.runs}
-                <span className="text-white/60">/{inn.wickets}</span>
-              </div>
+              <ScoreTicker runs={inn.runs} wickets={inn.wickets} />
               <div className="text-xs sm:text-sm text-white/70 leading-tight">
                 <div>
                   Ov <b className="text-white">{oversText(inn.balls)}</b>/{shown.settings.overs}
@@ -733,7 +733,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 function BallChip({ v }: { v: string }) {
   const cls =
     v === 'W' ? 'bg-red-500 text-white' : v === '6' ? 'bg-gold text-ink' : v === '4' ? 'bg-tide text-white' : /Wd|Nb|B|Lb/.test(v) ? 'bg-white/20 text-white text-[8px]' : v === '0' ? 'bg-white/10 text-white/70' : 'bg-white text-ink'
-  return <div className={`h-6 min-w-6 px-0.5 rounded-full grid place-items-center text-xs font-bold ${cls}`}>{v === '0' ? '•' : v}</div>
+  return <div className={`chip-in h-6 min-w-6 px-0.5 rounded-full grid place-items-center text-xs font-bold ${cls}`}>{v === '0' ? '•' : v}</div>
 }
 
 function Overlay({ children }: { children: React.ReactNode }) {

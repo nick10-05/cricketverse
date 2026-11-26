@@ -7,6 +7,7 @@ import { bowlStyle, CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, S
 import type { BallOutcome, Delivery, FieldSetting, PathPoint, ShotInput, ShotType, TeamId } from '../game/types'
 import type { PlayOptions } from '../render/scene'
 import { TEAM_COLORS } from '../render/scene'
+import { crowdAmbience, sfx } from '../render/sound'
 import { buildStadium, type Stadium } from './stadium'
 import { ballTexture, blobTexture, glowTexture, shade } from './textures'
 import {
@@ -185,6 +186,10 @@ export class Scene3D {
   private fieldPos: THREE.Vector3[] = []
   /** How far the fielders have walked in with the bowler (metres). */
   private walkIn = 0
+  /** Sound cues: the play and view time they were last checked at, and the crowd swell level. */
+  private sndPlay: Play | null = null
+  private sndT = -99
+  private swell = 0
   private actorsReplay = false
 
   // props
@@ -470,8 +475,36 @@ export class Scene3D {
       if (since < stop) rate = 0
       else rate = POST_SPEED * clamp((since - stop) / 0.08, 0.35, 1)
     }
+    // live slow motion over the big moment, easing in and out
+    if (p.armed) {
+      for (const [w0, w1, r] of this.slowWindows(p)) {
+        const e = Math.min(smooth((p.vt - (w0 - 0.06)) / 0.06), 1 - smooth((p.vt - w1) / 0.1))
+        if (e > 0) rate = Math.min(rate, POST_SPEED + (r - POST_SPEED) * e)
+      }
+    }
     p.vt = Math.max(p.vt, moment) + step * rate
     return p.vt
+  }
+
+  /** View-time windows [from, to, rate] that play in slow motion live (see ballAnimationMs). */
+  private slowWindows(p: Play): [number, number, number][] {
+    const o = p.outcome
+    if (!o) return []
+    const tr = p.tr
+    if (!o.path.length) {
+      if (o.wicket === 'bowled') return [[tr.tStumps - 0.04, tr.tStumps + 0.3, 0.3]]
+      if (o.wicket === 'stumped') return [[tr.tStumps + 0.24, tr.tStumps + 0.55, 0.35]]
+      return []
+    }
+    const th = this.hitTime(p)
+    const end = th + pathEnd(o.path)
+    if (o.boundary === 6) return [[th + 0.08, th + 0.4, 0.35]]
+    if (o.wicket === 'caught') return [[end - 0.28, end + 0.12, 0.35]]
+    if (o.wicket === 'run out' && o.throwPath.length) {
+      const te = th + pathEnd(o.throwPath)
+      return [[te - 0.22, te + 0.2, 0.35]]
+    }
+    return []
   }
 
   /** Skip an in-progress replay. */
@@ -488,6 +521,73 @@ export class Scene3D {
     for (const s of spots) this.spawnParticles(s, kind === 'six' ? 220 : kind === 'four' ? 140 : 80, colors, kind === 'six' ? 16 : kind === 'four' ? 7 : 4)
     if (kind === 'wicket') this.shake = 0.45
     this.excitement = kind === 'six' ? 1 : kind === 'four' ? 0.8 : 0.7
+  }
+
+  /**
+   * Sounds tied to what is on screen: each fires as the view clock passes its moment, so the
+   * thud lands when the ball hits the pitch, not when the server decided it would.
+   */
+  private sounds(p: Play | null, t: number, replay: boolean) {
+    if (!p) {
+      this.sndPlay = null
+      return
+    }
+    if (this.sndPlay !== p) {
+      this.sndPlay = p
+      this.sndT = -99
+    } else if (t < this.sndT - 1e-4) {
+      this.sndT = t // jumped back (replay start): pick up from here
+      return
+    }
+    const a = this.sndT
+    this.sndT = t
+    const cross = (x: number) => a < x && t >= x
+    const o = p.outcome
+    const tr = p.tr
+    const st = bowlStyle(p.d.type)
+    const s = st.gather / 0.36
+    if (!replay) for (const x of [-0.17 * s, -0.07 * s]) if (cross(x)) sfx.step(st.k)
+    const hit = !!o?.path.length
+    const th = o ? this.hitTime(p) : Infinity
+    if (cross(tr.tBounce) && (!hit || tr.tBounce < th)) {
+      sfx.pitch(st.k)
+      this.spawnParticles(new THREE.Vector3(tr.bounceX, 0.05, tr.bounceZ), 10 + Math.round(10 * st.k), [0xd9c49a, 0xc4ab7c, 0xe8dcc0], 1.2 + st.k, { size: 0.09, life: 0.5, additive: false })
+    }
+    if (!o) return
+    if (replay && hit && cross(th)) sfx.bat(o.grade === 'perfect' ? 1 : o.grade === 'good' ? 0.7 : 0.35, o.edged)
+    if (!hit) {
+      if (o.wicket === 'bowled') {
+        if (cross(tr.tStumps)) sfx.stumps()
+      } else if (o.wicket === 'lbw') {
+        if (cross(tr.tContact)) sfx.pitch(0.2) // ball into pad
+      } else if (cross(tr.tStumps + 0.12)) sfx.gloves()
+      if (o.wicket === 'stumped' && cross(tr.tStumps + 0.3)) sfx.stumps()
+      if (!replay && !o.wicket && p.shot?.swung && cross(tr.tStumps + 0.15)) sfx.ooh()
+      return
+    }
+    const pEnd = pathEnd(o.path)
+    if ((o.wicket === 'caught' || o.wicket === 'caught behind') && cross(th + pEnd)) sfx.gloves(true)
+    if (o.throwPath.length && cross(th + pathEnd(o.throwPath))) {
+      if (o.wicket === 'run out') sfx.stumps()
+      else sfx.gloves()
+    }
+    if (!replay && o.edged && !o.wicket && cross(th + 0.35)) sfx.ooh()
+    // bats grounded at each crease
+    const runs = !o.boundary && !o.wicket && o.extra !== 'wide' ? (o.extra === 'noball' ? o.runs - 1 : o.runs) : o.wicket === 'run out' ? Math.max(1, o.runs) : 0
+    const runDur = clamp((pEnd + 1.4) / Math.max(1, runs), 1.3, 2.4)
+    for (let k = 1; k <= runs; k++) if (cross(th + 0.1 + k * runDur)) sfx.run()
+    // the crowd rises with a ball in the air, and settles if it comes to nothing
+    if (!replay) {
+      const hitT = t - th
+      const ball = this.ball.position
+      let level = 0.12
+      if (hitT > 0 && hitT < pEnd && !p.resultFired) level = 0.12 + clamp((ball.y - 2) / 22, 0, 0.32)
+      if (p.resultFired && !o.boundary) level = 0.12
+      if (Math.abs(level - this.swell) > 0.02 && !(p.resultFired && o.boundary)) {
+        this.swell = level
+        crowdAmbience(true, level)
+      }
+    }
   }
 
   /** Bat meets ball: a beat of camera punch, a puff off the bat. */
@@ -588,6 +688,7 @@ export class Scene3D {
       for (const a of [this.striker, this.nonStriker, this.bowler, this.keeper, ...this.fielders, ...this.umpires]) a.cut()
     }
     this.updateWorld(p, viewT, dt, !!p?.replay)
+    this.sounds(p, viewT, !!p?.replay)
     this.updateCamera(p, viewT, dt, !!p?.replay, r.width, r.height)
     this.updateParticles(dt)
     this.stadium.crowd.update(this.clock, this.excitement)
@@ -889,7 +990,10 @@ export class Scene3D {
     // ---- ball, shadow, trail, markers
     this.ball.visible = ballVisible && !(p && t < 0)
     this.ball.position.copy(ball)
-    this.ball.rotation.x += dt * 25
+    // seam upright with backspin for the quicks, side-spin for the spinners, topspin off the bat
+    if (p && hitT === null && t > 0 && p.d.type === 'spin') this.ball.rotation.z += dt * 28 * (p.d.turn || 1)
+    else if (hitT !== null) this.ball.rotation.x -= dt * 30
+    else this.ball.rotation.x += dt * 38
     // Grow the ball a little with camera distance so it never shrinks to a speck on big hits.
     const bs = clamp(this.camera.position.distanceTo(ball) / 13, 1.1, 3.2)
     this.ball.scale.setScalar(bs)

@@ -47,6 +47,67 @@ function noise(duration: number, gain: number, filterFreq: number, type: BiquadF
   src.start()
 }
 
+/**
+ * Crowd voice: band-passed noise whose pitch glides and whose volume swells and fades, which is
+ * how thousands of people going "oooh" or roaring sound from the middle.
+ */
+function swell(duration: number, gain: number, f0: number, f1: number, q = 0.7, attack = 0.25, delay = 0) {
+  if (muted) return
+  const a = ac()
+  const len = Math.floor(a.sampleRate * duration)
+  const buf = a.createBuffer(1, len, a.sampleRate)
+  const data = buf.getChannelData(0)
+  let last = 0
+  for (let i = 0; i < len; i++) {
+    last = last * 0.6 + (Math.random() * 2 - 1) * 0.4
+    data[i] = last
+  }
+  const src = a.createBufferSource()
+  src.buffer = buf
+  const f = a.createBiquadFilter()
+  f.type = 'bandpass'
+  f.Q.value = q
+  const t0 = a.currentTime + delay
+  f.frequency.setValueAtTime(f0, t0)
+  f.frequency.linearRampToValueAtTime(f1, t0 + duration * 0.6)
+  f.frequency.linearRampToValueAtTime(f0, t0 + duration)
+  const g = a.createGain()
+  g.gain.setValueAtTime(0.0001, t0)
+  g.gain.exponentialRampToValueAtTime(gain, t0 + attack)
+  g.gain.setTargetAtTime(0.0001, t0 + duration * 0.55, duration * 0.18)
+  src.connect(f).connect(g).connect(a.destination)
+  src.start(t0)
+  src.stop(t0 + duration + 0.5)
+}
+
+/** Applause: thousands of random hand claps, built as sparse bursts of noise. */
+function applause(duration: number, gain: number) {
+  if (muted) return
+  const a = ac()
+  const len = Math.floor(a.sampleRate * duration)
+  const buf = a.createBuffer(2, len, a.sampleRate)
+  for (let ch = 0; ch < 2; ch++) {
+    const d = buf.getChannelData(ch)
+    const claps = Math.floor(duration * 900)
+    for (let c = 0; c < claps; c++) {
+      const at = Math.floor(Math.random() * len)
+      const env = Math.min(1, (at / len) * 8) * (1 - at / len)
+      const amp = (0.3 + Math.random() * 0.7) * env
+      const n = Math.floor(a.sampleRate * (0.004 + Math.random() * 0.006))
+      for (let i = 0; i < n && at + i < len; i++) d[at + i] += (Math.random() * 2 - 1) * amp * (1 - i / n)
+    }
+  }
+  const src = a.createBufferSource()
+  src.buffer = buf
+  const f = a.createBiquadFilter()
+  f.type = 'highpass'
+  f.frequency.value = 900
+  const g = a.createGain()
+  g.gain.value = gain
+  src.connect(f).connect(g).connect(a.destination)
+  src.start()
+}
+
 function tone(freq: number, duration: number, gain: number, type: OscillatorType = 'sine', slide = 0) {
   if (muted) return
   const a = ac()
@@ -79,18 +140,44 @@ export const sfx = {
     tone(210, 0.09, 0.22 + quality * 0.18, 'sine', 0.7)
     noise(0.025, 0.5 + quality * 0.4, 2600, 'bandpass', 1.5)
   },
-  bounce() {
-    noise(0.05, 0.25, 600, 'lowpass')
+  /** Ball into the pitch: a dull thud, heavier for quicker bowling. */
+  pitch(pace = 1) {
+    noise(0.06, 0.25 + 0.2 * pace, 420 + 200 * pace, 'lowpass')
+    tone(110 + 40 * pace, 0.07, 0.16 + 0.1 * pace, 'sine', 0.6)
   },
+  /** Ball into gloves or hands: a leathery pop. */
+  gloves(soft = false) {
+    noise(0.045, soft ? 0.3 : 0.5, soft ? 1000 : 1500, 'bandpass', 2)
+    tone(soft ? 240 : 320, 0.05, 0.14, 'sine', 0.7)
+  },
+  /** Stumps flattened: hollow wood knocks, then the bails rattling away. */
   stumps() {
-    tone(900, 0.15, 0.25, 'square', 0.5)
-    noise(0.2, 0.6, 2500)
+    tone(1500, 0.09, 0.22, 'triangle', 0.75)
+    tone(980, 0.12, 0.2, 'triangle', 0.7)
+    noise(0.05, 0.5, 2200, 'bandpass', 3)
+    if (muted) return
+    setTimeout(() => tone(2100, 0.05, 0.12, 'triangle', 0.9), 70)
+    setTimeout(() => tone(1800, 0.04, 0.08, 'triangle', 0.9), 150)
   },
+  /** A footfall on turf. */
+  step(weight = 0.5) {
+    noise(0.035, 0.08 + 0.12 * weight, 260, 'lowpass')
+  },
+  /** The crowd roars; bigger for a six or a wicket. */
   cheer(big: boolean) {
-    noise(big ? 2.4 : 1.4, big ? 0.55 : 0.35, 1100, 'bandpass', 0.4)
+    swell(big ? 3.2 : 2.2, big ? 0.7 : 0.45, 650, big ? 1050 : 900, 0.6, 0.18)
+    applause(big ? 3.5 : 2.6, big ? 0.35 : 0.25)
+  },
+  /** "Oooh": the batter is beaten, or an edge drops short. */
+  ooh() {
+    swell(1.4, 0.32, 420, 620, 1.2, 0.2)
+  },
+  /** Polite applause: a single, a good leave, a dot ball well bowled. */
+  clap(level = 0.5) {
+    applause(1.6, 0.1 + 0.12 * level)
   },
   groan() {
-    noise(1.2, 0.3, 450, 'lowpass')
+    swell(1.3, 0.3, 520, 340, 1.0, 0.15)
   },
   click() {
     tone(660, 0.05, 0.12, 'triangle')

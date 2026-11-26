@@ -31,8 +31,8 @@ export const MAX_ROOM = 30
 
 /** Animation time the clients need for one ball, so bots don't rush ahead. */
 export function ballAnimationMs(pathT: number, slowMo: boolean) {
-  // run-up + flight, the ball's path, the result pause, and the slow-mo replay (kept in step with Scene3D)
-  return 1750 + 700 + (Math.min(pathT, 5) * 1000) / 1.25 + 1300 + (slowMo ? 2300 : 0)
+  // run-up + flight, the ball's path, the result pause, live slow motion and the replay (kept in step with Scene3D)
+  return 1750 + 700 + (Math.min(pathT, 5) * 1000) / 1.25 + 1300 + (slowMo ? 3000 : 0)
 }
 
 export class Room {
