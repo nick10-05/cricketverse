@@ -129,7 +129,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
 
   const onContact = useCallback((o: BallOutcome) => {
     setLiveBatting(false)
-    sfx.bat(o.grade === 'perfect' ? 1 : o.grade === 'good' ? 0.7 : 0.35)
+    sfx.bat(o.grade === 'perfect' ? 1 : o.grade === 'good' ? 0.7 : 0.35, o.edged)
     const g = o.edged ? 'EDGE!' : o.grade === 'perfect' ? 'PERFECT' : o.grade === 'good' ? 'GOOD' : o.grade === 'early' ? 'EARLY' : o.grade === 'late' ? 'LATE' : ''
     if (g) setGrade({ text: g, key: Date.now() })
   }, [])

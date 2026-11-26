@@ -7,6 +7,7 @@ import {
   PITCH_LEN,
   trajectory,
   type Trajectory,
+  SWING_TIME,
 } from '../game/physics'
 import type { BallOutcome, Delivery, PathPoint, ShotInput, TeamId } from '../game/types'
 import { Camera, lerp, lerpV, type V3 } from './camera'
@@ -164,7 +165,7 @@ export class Scene {
     if (!p || !p.opts.live || p.shot) return null
     const t = this.flightTime(now)
     if (t < 0.05) return null // swinging during run-up is ignored
-    const timing = (t - p.tr.tContact) * 1000
+    const timing = (t + SWING_TIME - p.tr.tContact) * 1000
     p.shot = { swung: true, dir, loft, timing }
     return p.shot
   }
@@ -191,7 +192,7 @@ export class Scene {
   timingProbe(now = performance.now()) {
     const p = this.play
     if (!p || !p.opts.live) return null
-    return { t: this.flightTime(now), tContact: p.tr.tContact, d: p.d, shot: p.shot }
+    return { t: this.flightTime(now), tContact: p.tr.tContact - SWING_TIME, d: p.d, shot: p.shot }
   }
 
   isBusy() {

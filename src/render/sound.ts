@@ -66,9 +66,18 @@ export const sfx = {
   unlock() {
     if (!muted) ac()
   },
-  bat(quality: number) {
-    noise(0.09, 0.9 * quality + 0.2, 1800 + quality * 1400, 'bandpass', 2)
-    tone(520 + quality * 300, 0.08, 0.25, 'triangle', 0.6)
+  /** Willow on leather: a bright, short "tock" with a woody body; edges sound thin. */
+  bat(quality: number, edge = false) {
+    if (edge) {
+      tone(2400, 0.05, 0.22, 'triangle', 0.8)
+      noise(0.03, 0.35, 3200, 'highpass')
+      return
+    }
+    const f = 1050 + quality * 500
+    tone(f, 0.06 + quality * 0.06, 0.32 + quality * 0.3, 'sine', 0.92)
+    tone(f * 2.76, 0.035, 0.12 * quality, 'sine')
+    tone(210, 0.09, 0.22 + quality * 0.18, 'sine', 0.7)
+    noise(0.025, 0.5 + quality * 0.4, 2600, 'bandpass', 1.5)
   },
   bounce() {
     noise(0.05, 0.25, 600, 'lowpass')

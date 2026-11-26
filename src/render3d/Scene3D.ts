@@ -3,7 +3,7 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
-import { CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, trajectory, type Fielder, type Trajectory } from '../game/physics'
+import { CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, SWING_TIME, trajectory, type Fielder, type Trajectory } from '../game/physics'
 import type { BallOutcome, Delivery, FieldSetting, PathPoint, ShotInput, ShotType, TeamId } from '../game/types'
 import type { PlayOptions } from '../render/scene'
 import { TEAM_COLORS } from '../render/scene'
@@ -28,7 +28,7 @@ import {
 export type Quality = 'high' | 'medium' | 'low'
 
 const RUNUP = 1.15
-const BATTER = { x: -0.42, z: -1.0 }
+const BATTER = { x: -0.42, z: -0.8 }
 const NONSTRIKER = { x: -1.05, z: -PITCH_LEN - 0.4 }
 const BAT_CAM = { pos: new THREE.Vector3(1.3, 3.9, 8.6), target: new THREE.Vector3(-0.4, 0.4, -12), zoom: 1.6 }
 const AIM_CAM = { pos: new THREE.Vector3(0.6, 6.4, 8.2), target: new THREE.Vector3(0, 0, -11), zoom: 1.45 }
@@ -53,6 +53,11 @@ interface Play {
   doneFired: boolean
   replay: { from: number; to: number; startReal: number } | null
   replayDone: boolean
+  /** Live view clock (see viewTime) and the real time it last advanced from. */
+  vt: number
+  lastRaw: number
+  /** Whether the result was known before bat met ball (only then do hit-stop and slow-mo play). */
+  armed: boolean | null
 }
 
 const pathEnd = (p: PathPoint[]) => (p.length ? p[p.length - 1].t : 0)
@@ -192,6 +197,8 @@ export class Scene3D {
   private camTargetVel = new THREE.Vector3()
   private camZoomVel = 0
   private shake = 0
+  /** Zoom impulse queued for the next camera update (bat-on-ball punch). */
+  private kick = 0
   private excitement = 0
 
   constructor(canvas: HTMLCanvasElement, quality: Quality = 'high') {
@@ -368,6 +375,9 @@ export class Scene3D {
       doneFired: false,
       replay: null,
       replayDone: false,
+      vt: -99,
+      lastRaw: -99,
+      armed: null,
     }
     if (opts.delivery.field) this.field = opts.delivery.field
     this.aim = null
@@ -384,7 +394,7 @@ export class Scene3D {
     if (!p || !p.opts.live || p.shot) return null
     const t = this.flightTime(now)
     if (t < 0.05) return null
-    const timing = (t - p.tr.tContact) * 1000
+    const timing = (t + SWING_TIME - p.tr.tContact) * 1000
     p.shot = { swung: true, dir, loft, timing }
     return p.shot
   }
@@ -402,7 +412,7 @@ export class Scene3D {
     if (!p) return
     p.outcome = o
     const tr = p.tr
-    if (o.path.length) p.resultAt = tr.tContact + pathEnd(o.path) + (o.wicket === 'run out' && o.throwPath.length ? pathEnd(o.throwPath) - pathEnd(o.path) : 0)
+    if (o.path.length) p.resultAt = this.hitTime(p) + pathEnd(o.path) + (o.wicket === 'run out' && o.throwPath.length ? pathEnd(o.throwPath) - pathEnd(o.path) : 0)
     else p.resultAt = o.wicket === 'bowled' || o.wicket === 'lbw' ? tr.tStumps + 0.05 : tr.tStumps + 0.25
   }
 
@@ -410,11 +420,49 @@ export class Scene3D {
   timingProbe(now = performance.now()) {
     const p = this.play
     if (!p || !p.opts.live) return null
-    return { t: this.flightTime(now), tContact: p.tr.tContact, d: p.d, shot: p.shot }
+    return { t: this.flightTime(now), tContact: p.tr.tContact - SWING_TIME, d: p.d, shot: p.shot }
   }
 
   isBusy() {
     return !!this.play
+  }
+
+  /**
+   * When bat meets ball on screen. The swing starts at the tap and is drawn so the bat lands
+   * on the ball; a late tap can only push contact back a fraction (the ball can't wait).
+   */
+  private hitTime(p: Play) {
+    const s = p.shot
+    if (!s?.swung || !p.outcome?.path.length) return p.tr.tContact
+    const tap = p.tr.tContact - SWING_TIME + s.timing / 1000
+    return p.tr.tContact + clamp(tap + 0.045 - p.tr.tContact, 0, 0.02)
+  }
+
+  /**
+   * The live view's clock. It follows real time exactly until bat meets ball (so what you see
+   * is what you time against), then holds for a beat on a sweet hit and plays the rest of the
+   * ball briskly.
+   */
+  private viewTime(p: Play, raw: number) {
+    const o = p.outcome
+    const moment = !o ? null : o.path.length ? this.hitTime(p) : p.tr.tContact
+    if (moment === null || raw <= moment) {
+      p.vt = raw
+      p.lastRaw = raw
+      return raw
+    }
+    if (p.armed === null) p.armed = p.vt <= moment
+    const step = p.vt < moment ? raw - moment : clamp(raw - p.lastRaw, 0, 0.1)
+    p.lastRaw = raw
+    const since = raw - moment
+    let rate = POST_SPEED
+    if (p.armed && o!.path.length && !o!.edged) {
+      const stop = o!.grade === 'perfect' || o!.boundary ? 0.07 : o!.grade === 'good' ? 0.04 : 0
+      if (since < stop) rate = 0
+      else rate = POST_SPEED * clamp((since - stop) / 0.08, 0.35, 1)
+    }
+    p.vt = Math.max(p.vt, moment) + step * rate
+    return p.vt
   }
 
   /** Skip an in-progress replay. */
@@ -433,7 +481,17 @@ export class Scene3D {
     this.excitement = kind === 'six' ? 1 : kind === 'four' ? 0.8 : 0.7
   }
 
-  private spawnParticles(at: THREE.Vector3, n: number, colors: number[], speed: number) {
+  /** Bat meets ball: a beat of camera punch, a puff off the bat. */
+  private impact(p: Play) {
+    const o = p.outcome!
+    const q = o.edged ? 0.25 : o.grade === 'perfect' ? 1 : o.grade === 'good' ? 0.7 : 0.4
+    this.kick = 0.9 * q
+    this.shake = Math.max(this.shake, 0.08 * q)
+    const at = v(p.tr.pos(this.hitTime(p)))
+    this.spawnParticles(at, Math.round(14 + 24 * q), [0xfff4d6, 0xe8d3a8, 0xffffff], 2.2 + 2.5 * q, { size: 0.07, life: 0.45, additive: false })
+  }
+
+  private spawnParticles(at: THREE.Vector3, n: number, colors: number[], speed: number, opts: { size?: number; life?: number; additive?: boolean } = {}) {
     const pos = new Float32Array(n * 3)
     const col = new Float32Array(n * 3)
     const vel = new Float32Array(n * 3)
@@ -450,10 +508,17 @@ export class Scene3D {
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3))
     g.setAttribute('color', new THREE.BufferAttribute(col, 3))
-    const m = new THREE.PointsMaterial({ size: speed > 10 ? 1.4 : 0.35, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, map: glowTexture() })
+    const m = new THREE.PointsMaterial({
+      size: opts.size ?? (speed > 10 ? 1.4 : 0.35),
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: opts.additive === false ? THREE.NormalBlending : THREE.AdditiveBlending,
+      map: glowTexture(),
+    })
     const pts = new THREE.Points(g, m)
     this.scene.add(pts)
-    this.particles.push({ pts, vel, life: 0, max: 2.2 })
+    this.particles.push({ pts, vel, life: 0, max: opts.life ?? 2.2 })
   }
 
   setScoreboard(big: string, small: string, color: string) {
@@ -504,7 +569,7 @@ export class Scene3D {
 
     const p = this.play
     const rawT = p ? this.flightTime(now) : -99
-    const realT = p && rawT > p.tr.tContact ? p.tr.tContact + (rawT - p.tr.tContact) * POST_SPEED : rawT
+    const realT = p ? this.viewTime(p, rawT) : rawT
     let viewT = realT
     if (p?.replay) viewT = p.replay.from + ((now - p.replay.startReal) / 1000) * REPLAY_SPEED
 
@@ -526,8 +591,9 @@ export class Scene3D {
       p.shot = { swung: false, dir: 0, loft: false, timing: 0 }
       p.opts.onNoSwing?.()
     }
-    if (p.outcome && p.outcome.path.length && !p.contactFired && t >= p.tr.tContact) {
+    if (p.outcome && p.outcome.path.length && !p.contactFired && t >= this.hitTime(p)) {
       p.contactFired = true
+      this.impact(p)
       p.opts.onContact?.(p.outcome)
     }
     if (p.outcome && p.resultAt !== null && !p.resultFired && t >= p.resultAt) {
@@ -544,8 +610,9 @@ export class Scene3D {
       const wantReplay = (o.boundary === 6 || !!o.wicket) && !p.replayDone
       const since = t - (p.resultAt ?? 0)
       if (wantReplay && !p.replay && since >= 0.7) {
-        const from = o.path.length ? p.tr.tContact - 0.5 : p.tr.tStumps - 0.6
-        const to = o.path.length ? Math.min(p.resultAt!, p.tr.tContact + 0.95) : p.tr.tStumps + 0.5
+        const th = this.hitTime(p)
+        const from = o.path.length ? th - 0.5 : p.tr.tStumps - 0.6
+        const to = o.path.length ? Math.min(p.resultAt!, th + 0.95) : p.tr.tStumps + 0.5
         p.replay = { from, to, startReal: now }
         this.onReplay?.(true)
       }
@@ -574,7 +641,8 @@ export class Scene3D {
     const field = p ? p.field : FIELDS[this.field]
     const o = p?.outcome ?? null
     const tr = p?.tr ?? null
-    const hitT = p && o && o.path.length && t >= tr!.tContact ? t - tr!.tContact : null
+    const th = p && o ? this.hitTime(p) : 0
+    const hitT = p && o && o.path.length && t >= th ? t - th : null
     const pEnd = o ? pathEnd(o.path) : 0
 
     // ---- ball
@@ -585,7 +653,11 @@ export class Scene3D {
         ballVisible = true // in the bowler's hand, placed below
       } else if (hitT !== null && o) {
         ballVisible = true
-        if (hitT <= pEnd) ball = interp(o.path, hitT)
+        if (hitT <= pEnd) {
+          ball = interp(o.path, hitT)
+          // leave from where the ball really met the bat, easing onto the computed flight
+          if (hitT < 0.25) ball.addScaledVector(v(tr.pos(th)).sub(v(o.path[0])), 1 - smooth(hitT / 0.25))
+        }
         else if (o.throwPath.length && hitT >= o.throwPath[0].t) ball = interp(o.throwPath, hitT)
         else if (o.wicket === 'caught' || o.wicket === 'caught behind') {
           const f = o.fielder === 0 ? this.keeper : o.fielder === 1 ? this.bowler : this.fielders[o.fielder - 2]
@@ -817,27 +889,48 @@ export class Scene3D {
     const shot = p.shot
     const type: ShotType = shot ? (o?.shot ?? (shot.swung ? (shot.dir < -0.4 ? 'flick' : shot.dir > 0.4 ? 'cover drive' : 'straight drive') : 'leave')) : 'leave'
     const def = SHOTS[type] ?? SHOTS['straight drive']
-    const tc = shot?.swung ? tr.tContact + shot.timing / 1000 : tr.tContact
-    // Backlift as the bowler releases; leave = lift the bat high out of the way.
+    const swung = !!shot?.swung
+    // The swing starts at the tap and lands on the ball at the hit time.
+    const tap = swung ? tr.tContact - SWING_TIME + shot!.timing / 1000 : tr.tContact
+    const connect = swung && !!o?.path.length
+    const ti = connect ? this.hitTime(p) : tap + SWING_TIME
+    // Backlift as the bowler releases, with a small back-and-across trigger.
     const lift = smooth((t - (tr.tContact - 0.6)) / 0.35)
     let k = lerpK(STANCE, BACKLIFT, lift)
     const front = o ? o.footwork === 'front' : def.front
-    const stride = smooth((t - (tc - 0.32)) / 0.22)
+    // Feet move as the batter reads the length (before the tap), so they never jump on a late tap.
+    const stride = smooth((t - (tr.tContact - 0.34)) / 0.24)
+    const trigger = smooth((t + 0.25) / 0.25) * (1 - stride)
     let pose: Pose
     if (front) {
-      pose = lerpPose(stance, { ...stance, lHip: [-0.25, 0, 0.55], lKnee: [0.55, 0, 0], rHip: [0.15, 0, -0.25], rKnee: [0.2, 0, 0], spine: [0.42, 0, 0], offset: [0.16, -0.1, 0] }, stride)
+      pose = lerpPose(stance, { ...stance, lHip: [-0.25, 0, 0.55], lKnee: [0.6, 0, 0], rHip: [0.15, 0, -0.25], rKnee: [0.25, 0, 0], spine: [0.5, 0, 0], offset: [0.2, -0.12, 0] }, stride)
     } else {
-      pose = lerpPose(stance, { ...stance, rHip: [0.1, 0, -0.4], lHip: [-0.1, 0, 0.1], lKnee: [0.15, 0, 0], rKnee: [0.15, 0, 0], spine: [0.15, 0, 0], offset: [-0.12, 0, 0] }, stride)
+      pose = lerpPose(stance, { ...stance, rHip: [0.1, 0, -0.4], lHip: [-0.1, 0, 0.1], lKnee: [0.15, 0, 0], rKnee: [0.15, 0, 0], spine: [0.15, 0, 0], offset: [-0.14, 0, 0.04] }, stride)
     }
-    if (shot?.swung || type === 'leave') {
-      const down = (t - (tc - 0.14)) / 0.16
-      const fol = (t - (tc + 0.02)) / 0.34
+    pose.offset = [(pose.offset?.[0] ?? 0) - 0.05 * trigger, pose.offset?.[1] ?? 0, (pose.offset?.[2] ?? 0) + 0.06 * trigger]
+
+    // Reach: move the impact so the middle of the blade meets the ball where it actually is.
+    let impact: K = def.impact
+    const shift = new THREE.Vector3()
+    if (swung && type !== 'leave') {
+      b.root.updateMatrixWorld(true)
+      const ballLocal = b.root.worldToLocal(v(tr.pos(Math.min(ti, tr.tStumps))))
+      const sweet = v3(def.impact.g).addScaledVector(v3(def.impact.d).normalize(), 0.5)
+      shift.copy(ballLocal).sub(sweet)
+      shift.set(clamp(shift.x, -0.6, 0.45), clamp(shift.y, -0.55, 0.55), clamp(shift.z, -0.55, 0.55))
+      if (!connect) shift.y += 0.14 // beaten: the bat goes over the top of it
+      impact = { g: [def.impact.g[0] + shift.x, def.impact.g[1] + shift.y, def.impact.g[2] + shift.z], d: def.impact.d }
+    }
+    let watch = 0
+    if (swung || type === 'leave') {
       if (type === 'leave') {
         k = lerpK(BACKLIFT, def.impact, smooth((t - (tr.tContact - 0.3)) / 0.25))
-      } else if (down >= 0 && fol < 0) {
-        k = lerpK(BACKLIFT, def.impact, smooth(down))
-      } else if (fol >= 0) {
-        k = lerpK(def.impact, def.follow, smooth(fol))
+      } else if (t >= tap && t < ti) {
+        // the bat accelerates into the ball
+        k = lerpK(BACKLIFT, impact, Math.pow(clamp((t - tap) / Math.max(0.05, ti - tap), 0, 1), 1.4))
+      } else if (t >= ti) {
+        const fol = (t - ti) / 0.34
+        k = lerpK(impact, def.follow, smooth(fol))
         // rotate the follow-through toward where the ball went
         if (hitT !== null && o?.path.length) {
           const end = o.path[Math.min(o.path.length - 1, 4)]
@@ -846,15 +939,25 @@ export class Scene3D {
           k.g.applyAxisAngle(new THREE.Vector3(0, 1, 0), -rot)
           k.d.applyAxisAngle(new THREE.Vector3(0, 1, 0), -rot).normalize()
         }
-        pose = lerpPose(pose, { ...pose, chest: [0, -0.5, 0], spine: [0.25, -0.2, 0] }, smooth(fol) * 0.6)
+        pose = lerpPose(pose, { ...pose, chest: [0, -0.5, 0], spine: [(pose.spine?.[0] ?? 0.3) - 0.1, -0.2, 0] }, smooth(fol) * 0.6)
       }
+      // head down, eyes on the ball onto the bat; body shifts toward the ball
+      watch = type === 'leave' ? 0 : smooth((t - (ti - 0.18)) / 0.18) * (1 - smooth((t - ti - 0.35) / 0.4))
+      const reach = smooth((t - tap) / Math.max(0.05, ti - tap))
+      pose.offset = [
+        (pose.offset?.[0] ?? 0) + shift.x * 0.35 * reach,
+        (pose.offset?.[1] ?? 0) + Math.min(0, shift.y) * 0.4 * reach,
+        (pose.offset?.[2] ?? 0) + shift.z * 0.45 * reach,
+      ]
     }
+    pose.neck = [-0.12 + 0.45 * watch, 1.15 - 0.35 * watch, 0]
     // Out: drop the bat a little and look down
     if (o?.wicket && p.resultFired && hitT === null) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0, 0] }, 0.7)
     if (o?.wicket && p.resultFired && o.path.length) pose = lerpPose(pose, { ...IDLE, neck: [0.5, 0.6, 0] }, 0.6)
     b.setPose(pose)
     b.holdBat(k.g, k.d, new THREE.Vector3(1, 0, 0.2))
   }
+
 
   /** Run `runs` lengths between the creases. dir +1 = striker (starts at the striker's end). */
   private animateRunner(r: Cricketer, t: number, runs: number, runDur: number, dir: 1 | -1, laneX: number) {
@@ -910,7 +1013,8 @@ export class Scene3D {
   private updateCamera(p: Play | null, t: number, dt: number, replay: boolean, w: number, h: number) {
     const o = p?.outcome ?? null
     const tr = p?.tr
-    const hitT = p && o && o.path.length && t >= tr!.tContact ? t - tr!.tContact : null
+    const th = p && o ? this.hitTime(p) : 0
+    const hitT = p && o && o.path.length && t >= th ? t - th : null
     const ball = this.ball.position
     let pos = BAT_CAM.pos.clone()
     let target = BAT_CAM.target.clone()
@@ -973,6 +1077,10 @@ export class Scene3D {
     const zr = smoothDamp(this.camZoom, zoom, this.camZoomVel, rate, dt)
     this.camZoom = zr[0]
     this.camZoomVel = zr[1]
+    if (this.kick > 0) {
+      this.camZoomVel += this.kick
+      this.kick = 0
+    }
     const cp = this.camPos.clone()
     if (this.shake > 0) {
       this.shake -= dt

@@ -15,6 +15,11 @@ export const RELEASE_Z = -19.2
 export const RELEASE_Y = 2.15
 export const FIELD_CENTER = { x: 0, z: -PITCH_LEN / 2 }
 export const BOUNDARY_R = 62
+/**
+ * Seconds from the batter's tap to bat meeting ball. The tap starts the swing, so a shot is
+ * perfectly timed when the tap comes this long before the ball reaches the bat.
+ */
+export const SWING_TIME = 0.1
 export const STUMP_HALF_W = 0.115
 export const STUMP_H = 0.71
 
