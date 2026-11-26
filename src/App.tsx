@@ -75,7 +75,8 @@ function Room({ client, onLeave }: { client: RoomClient; onLeave: () => void }) 
       </Center>
     )
   }
-  if (snap.match) return <GameScreen client={client} snap={snap} onLeave={onLeave} />
+  // A fresh screen per match: ball numbers restart at 0, so nothing may carry over from the last one.
+  if (snap.match) return <GameScreen key={snap.match.startedAt} client={client} snap={snap} onLeave={onLeave} />
   return <Lobby client={client} snap={snap} onLeave={onLeave} />
 }
 

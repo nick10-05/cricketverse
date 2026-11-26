@@ -1,5 +1,6 @@
 import { botDelivery, botShot } from './ai'
 import { resolveBall } from './physics'
+import { ballAnimationMs } from './pacing'
 import { applyBall, applyFreeHit, createMatch, defaultWickets, isMode, MAX_OVERS, MAX_TEAM, other, startSecondInnings, teamSizeFor, wicketCap } from './rules'
 import type { Delivery, LobbyState, MatchSettings, MatchState, Player, ShotInput, TeamId } from './types'
 import type { ClientMsg, HostMsg } from '../net/protocol'
@@ -29,17 +30,14 @@ const BOT_NAMES = [
 const rid = () => Math.random().toString(36).slice(2, 8)
 export const MAX_ROOM = 30
 
-/** Animation time the clients need for one ball, so bots don't rush ahead. */
-export function ballAnimationMs(pathT: number, slowMo: boolean) {
-  // run-up + flight, the ball's path, the result pause, live slow motion and the replay (kept in step with Scene3D)
-  return 1750 + 700 + (Math.min(pathT, 5) * 1000) / 1.25 + 1300 + (slowMo ? 3000 : 0)
-}
+/** Shortest pause after a shot before the next ball (result banner and settle). */
+const MIN_AFTER_SHOT_MS = 1200
 
 export class Room {
   lobby: LobbyState
   match: MatchState | null = null
   private out: RoomOutput
-  private pending: { ballId: number; delivery: Delivery } | null = null
+  private pending: { ballId: number; delivery: Delivery; at: number } | null = null
   private timers: ReturnType<typeof setTimeout>[] = []
   private shotTimeout: ReturnType<typeof setTimeout> | null = null
   private bowlTimeout: ReturnType<typeof setTimeout> | null = null
@@ -295,7 +293,7 @@ export class Room {
     m.turn.stage = 'bat'
     const ballId = m.ballId
     const striker = m.turn.striker
-    this.pending = { ballId, delivery }
+    this.pending = { ballId, delivery, at: Date.now() }
     this.out.broadcast({ t: 'match', match: m })
     this.out.broadcast({ t: 'ball', ballId, delivery, striker })
     if (this.shotTimeout) clearTimeout(this.shotTimeout)
@@ -313,13 +311,14 @@ export class Room {
     if (!m || !this.pending || this.pending.ballId !== ballId || m.turn?.striker !== pid || m.turn.stage !== 'bat') return
     if (!validShot(shot)) return
     if (this.shotTimeout) clearTimeout(this.shotTimeout)
-    const delivery = this.pending.delivery
+    const { delivery, at } = this.pending
     this.pending = null
     const outcome = applyFreeHit(m, resolveBall(delivery, shot))
     this.match = applyBall(m, outcome)
     this.out.broadcast({ t: 'replay', ballId, delivery, shot, outcome, match: this.match })
-    const pathT = outcome.path.length ? outcome.path[outcome.path.length - 1].t : 0
-    const wait = ballAnimationMs(pathT, !!outcome.wicket || outcome.boundary === 6)
+    // The run-up and flight have already played on screens by the time a human's shot arrives,
+    // so only wait for what's left of the animation (a bot's shot comes almost at once).
+    const wait = Math.max(MIN_AFTER_SHOT_MS, ballAnimationMs(delivery, outcome) - (Date.now() - at))
     if (this.match.phase === 'break') {
       this.later(() => {
         if (this.match?.phase !== 'break') return

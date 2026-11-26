@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { gradeTiming, resolveBall, trajectory, classifyShot } from './physics'
 import { applyBall, applyFreeHit, createMatch, inningsOvers, inningsWickets, isMode, MAX_SUPER_OVERS, startSecondInnings } from './rules'
 import { DEFAULT_SETTINGS, Room, sanitizeSettings } from './room'
+import { ballAnimationMs } from './pacing'
 import type { BallOutcome, Delivery, MatchSettings, MatchState } from './types'
 import type { HostMsg } from '../net/protocol'
 
@@ -216,6 +217,28 @@ describe('room', () => {
     const { room } = makeRoom()
     expect(() => room.handle('host', { t: 'bowl', delivery: { type: 'nope' } as unknown as Delivery })).not.toThrow()
     expect(() => room.handle('host', null as unknown as never)).not.toThrow()
+  })
+
+  it('does not make a human batter wait for the run-up twice', () => {
+    const { room, sent } = makeRoom()
+    room.handle('host', { t: 'addBot', team: 'B' })
+    // make sure the human bats and the bot bowls
+    for (let i = 0; i < 50; i++) {
+      room.handle('host', { t: 'start' })
+      if (room.match!.turn!.striker === 'host') break
+      room.handle('host', { t: 'toLobby' })
+    }
+    expect(room.match!.turn!.striker).toBe('host')
+    vi.advanceTimersByTime(4400) // the bot bowls the first ball
+    const ball = sent.filter((s) => s.msg.t === 'ball').at(-1)!.msg as Extract<HostMsg, { t: 'ball' }>
+    // the batter leaves it once the ball has passed on their screen, ~2.7 s after it was bowled
+    vi.advanceTimersByTime(2700)
+    room.handle('host', { t: 'shot', ballId: ball.ballId, shot: { swung: false, dir: 0, loft: false, timing: 0 } })
+    const replay = sent.filter((s) => s.msg.t === 'replay').at(-1)!.msg as Extract<HostMsg, { t: 'replay' }>
+    const full = ballAnimationMs(replay.delivery, replay.outcome)
+    const before = sent.filter((s) => s.msg.t === 'ball').length
+    vi.advanceTimersByTime(Math.max(1200, full - 2700) + 50)
+    if (room.match!.phase === 'playing') expect(sent.filter((s) => s.msg.t === 'ball').length).toBe(before + 1)
   })
 
   it('carries a tied match through super-over breaks to a result', () => {

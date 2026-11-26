@@ -5,6 +5,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 import { bowlStyle, CONTACT_Z, CREASE_Z, FIELDS, fieldFor, PITCH_LEN, STUMP_H, SWING_TIME, trajectory, type Fielder, type Trajectory } from '../game/physics'
 import type { BallOutcome, Delivery, FieldSetting, PathPoint, ShotInput, ShotType, TeamId } from '../game/types'
+import { LINGER, POST_SPEED, REPLAY_DELAY, REPLAY_SPEED, replaySpan, resultTime, slowWindows } from '../game/pacing'
 import type { PlayOptions } from '../render/scene'
 import { TEAM_COLORS } from '../render/scene'
 import { crowdAmbience, sfx } from '../render/sound'
@@ -39,11 +40,7 @@ const BATTER = { x: -0.42, z: -0.8 }
 const NONSTRIKER = { x: -1.05, z: -PITCH_LEN - 0.4 }
 const BAT_CAM = { pos: new THREE.Vector3(1.3, 3.9, 8.6), target: new THREE.Vector3(-0.4, 0.4, -12), zoom: 1.6 }
 const AIM_CAM = { pos: new THREE.Vector3(0.6, 6.4, 8.2), target: new THREE.Vector3(0, 0, -11), zoom: 1.45 }
-const REPLAY_SPEED = 0.6
-/** Seconds the result stays on screen before the next ball. */
-const LINGER = 1.3
-/** After contact the live view runs a little faster than real time, so hits resolve briskly. */
-export const POST_SPEED = 1.25
+export { POST_SPEED }
 
 interface Play {
   opts: PlayOptions
@@ -425,9 +422,7 @@ export class Scene3D {
     const p = this.play
     if (!p) return
     p.outcome = o
-    const tr = p.tr
-    if (o.path.length) p.resultAt = this.hitTime(p) + pathEnd(o.path) + (o.wicket === 'run out' && o.throwPath.length ? pathEnd(o.throwPath) - pathEnd(o.path) : 0)
-    else p.resultAt = o.wicket === 'bowled' || o.wicket === 'lbw' ? tr.tStumps + 0.05 : tr.tStumps + 0.25
+    p.resultAt = resultTime(p.d, o, this.hitTime(p))
   }
 
   /** For the batting timing bar: where the live ball is relative to the contact moment. */
@@ -486,25 +481,9 @@ export class Scene3D {
     return p.vt
   }
 
-  /** View-time windows [from, to, rate] that play in slow motion live (see ballAnimationMs). */
+  /** View-time windows [from, to, rate] that play in slow motion live (shared with the room's pacing). */
   private slowWindows(p: Play): [number, number, number][] {
-    const o = p.outcome
-    if (!o) return []
-    const tr = p.tr
-    if (!o.path.length) {
-      if (o.wicket === 'bowled') return [[tr.tStumps - 0.04, tr.tStumps + 0.3, 0.3]]
-      if (o.wicket === 'stumped') return [[tr.tStumps + 0.24, tr.tStumps + 0.55, 0.35]]
-      return []
-    }
-    const th = this.hitTime(p)
-    const end = th + pathEnd(o.path)
-    if (o.boundary === 6) return [[th + 0.08, th + 0.4, 0.35]]
-    if (o.wicket === 'caught') return [[end - 0.28, end + 0.12, 0.35]]
-    if (o.wicket === 'run out' && o.throwPath.length) {
-      const te = th + pathEnd(o.throwPath)
-      return [[te - 0.22, te + 0.2, 0.35]]
-    }
-    return []
+    return p.outcome ? slowWindows(p.d, p.outcome, this.hitTime(p)) : []
   }
 
   /** Skip an in-progress replay. */
@@ -725,10 +704,8 @@ export class Scene3D {
       const o = p.outcome!
       const wantReplay = (o.boundary === 6 || !!o.wicket) && !p.replayDone
       const since = t - (p.resultAt ?? 0)
-      if (wantReplay && !p.replay && since >= 0.7) {
-        const th = this.hitTime(p)
-        const from = o.path.length ? th - 0.5 : p.tr.tStumps - 0.6
-        const to = o.path.length ? Math.min(p.resultAt!, th + 0.95) : p.tr.tStumps + 0.5
+      if (wantReplay && !p.replay && since >= REPLAY_DELAY) {
+        const [from, to] = replaySpan(p.d, o, this.hitTime(p))
         p.replay = { from, to, startReal: now }
         this.onReplay?.(true)
       }
