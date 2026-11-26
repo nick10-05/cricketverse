@@ -55,7 +55,8 @@ const http = createServer(async (req, res) => {
     const ext = extname(file)
     res.writeHead(200, {
       'content-type': MIME[ext] ?? 'application/octet-stream',
-      'cache-control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+      // hashed build files never change; other files (audio, icons) may be updated in place
+      'cache-control': ext === '.html' ? 'no-cache' : url.pathname.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'public, max-age=86400',
     })
     res.end(body)
   } catch {

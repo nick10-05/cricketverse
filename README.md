@@ -38,7 +38,7 @@ Created by **[nick10-05](https://github.com/nick10-05)**.
 - Procedurally built, animated cricketers: batting strokes, bowling action, running between wickets, diving and catching, throws, keeper, and umpires who signal fours, sixes, wides and wickets.
 - TV-style camera director: batting view, chase cam, stump cam and slow-motion replays of sixes and wickets.
 - Bloom, shadows and tone mapping, with High / Medium / Low / 2D quality settings for any device.
-- Synthesised sound: bat on ball, crowd, drums for boundaries, a horn for sixes.
+- Stadium sound: a living crowd murmur, crisp bat on ball, pitch bounce and keeper's gloves, roars for fours and sixes, a wicket reaction and umpire cues for wides and no-balls. Separate volume sliders for ambience, crowd and effects.
 
 **Stats**
 - Full scorecards with strike rates, economy, extras, fall of wickets and a run-progression chart.
@@ -108,7 +108,8 @@ For the full walkthrough (the life of one ball, disconnects and bots, server pro
 | `src/net/` | Room client (server, peer-to-peer and local transports) and message types |
 | `server/` | Node server: Socket.IO rooms, rate limiting, static hosting |
 | `src/render3d/` | Three.js renderer: stadium, procedural cricketers, animations, camera director, replays |
-| `src/render/` | 2D canvas fallback renderer and synthesised sound |
+| `src/render/` | 2D canvas fallback renderer and the sound engine |
+| `public/audio/` | Short CC0 sound clips (see THIRD_PARTY_NOTICES.md) |
 | `src/ui/` | React screens: home, lobby, game, scorecard, stats |
 | `scripts/smoke-server.ts` | End-to-end test: two bots play a full match through a running server |
 | `legacy/` | The previous version of the project (not built) |
@@ -132,6 +133,6 @@ Contributions are welcome, whether it's a bug report, an idea or code. Read [CON
 
 CricketVerse Arena was created by **[nick10-05](https://github.com/nick10-05)**.
 
-It is an original game and is not affiliated with any other cricket game or company. All art, models and sounds are generated in code; third-party libraries and fonts are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+It is an original game and is not affiliated with any other cricket game or company. All art and models are generated in code. Sound clips come from public-domain (CC0) recordings at [BigSoundBank](https://bigsoundbank.com); they, the third-party libraries and fonts are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Released under the [MIT License](LICENSE).

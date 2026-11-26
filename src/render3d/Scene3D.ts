@@ -547,6 +547,7 @@ export class Scene3D {
     const st = bowlStyle(p.d.type)
     const s = st.gather / 0.36
     if (!replay) for (const x of [-0.17 * s, -0.07 * s]) if (cross(x)) sfx.step(st.k)
+    if (!replay && cross(0)) sfx.release(st.k)
     const hit = !!o?.path.length
     const th = o ? this.hitTime(p) : Infinity
     if (cross(tr.tBounce) && (!hit || tr.tBounce < th)) {

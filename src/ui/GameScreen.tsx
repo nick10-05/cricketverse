@@ -7,7 +7,8 @@ import { Scene, TEAM_COLORS } from '../render/scene'
 import { detectQuality, Scene3D, type Quality } from '../render3d/Scene3D'
 import { ScoreTicker } from './ScoreTicker'
 import { recordMatch } from './history'
-import { crowdAmbience, isMuted, setMuted, sfx } from '../render/sound'
+import { crowdAmbience, isMuted, sfx } from '../render/sound'
+import { SoundPanel } from './SoundPanel'
 import { QuickChat, Toast } from './bits'
 import { Scorecard } from './Scorecard'
 import { TimingBar } from './TimingBar'
@@ -35,7 +36,6 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
   const [grade, setGrade] = useState<{ text: string; key: number } | null>(null)
   const [loft, setLoft] = useState(false)
   const loftRef = useRef(false)
-  const [muted, setMutedState] = useState(isMuted())
   const [liveBatting, setLiveBatting] = useState(false)
   const [confirmLeave, setConfirmLeave] = useState(false)
 
@@ -138,17 +138,21 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
   const onResult = useCallback((o: BallOutcome) => {
     const kind = o.boundary === 6 ? 'six' : o.boundary === 4 ? 'four' : o.wicket ? 'out' : o.runs > 0 ? 'runs' : 'dot'
     setLabel({ text: o.label, kind, key: Date.now() })
+    // the umpire's cue for extras (a free-hit boundary still gets its cheer below)
+    if (o.extra === 'wide') sfx.wide()
+    else if (o.extra === 'noball') sfx.noball()
     if (o.boundary) {
-      sfx.cheer(o.boundary === 6)
-      sfx.drums(o.boundary === 6 ? 10 : 6)
-      if (o.boundary === 6) sfx.horn()
-      crowdAmbience(true, 0.3)
-      setTimeout(() => crowdAmbience(true, 0.12), 3000)
+      if (o.boundary === 6) sfx.six()
+      else sfx.four()
+      crowdAmbience(true, o.boundary === 6 ? 0.36 : 0.28)
+      setTimeout(() => crowdAmbience(true, 0.12), o.boundary === 6 ? 3500 : 2600)
     }
     else if (o.wicket) {
       // the 3D view plays the stumps exactly as they break
       if (!(sceneRef.current instanceof Scene3D) && (o.wicket === 'bowled' || o.wicket === 'stumped' || o.wicket === 'run out')) sfx.stumps()
-      sfx.cheer(true)
+      sfx.wicket()
+      crowdAmbience(true, 0.3)
+      setTimeout(() => crowdAmbience(true, 0.12), 3000)
     } else if (o.runs > 0 && !o.extra) sfx.clap(Math.min(1, o.runs * 0.3))
     else if (!o.path.length && o.grade !== 'none') sfx.whoosh()
     if (!o.path.length && o.grade === 'miss') setGrade({ text: 'MISSED', key: Date.now() })
@@ -445,17 +449,7 @@ export function GameScreen({ client, snap, onLeave }: { client: RoomClient; snap
             </div>
           </div>
           <div className="flex gap-2 pointer-events-auto">
-            <button
-              className="h-full w-10 sm:w-auto sm:aspect-square shrink-0 rounded-2xl bg-black/60 border border-white/10 text-base sm:text-lg"
-              onClick={() => {
-                setMuted(!muted)
-                setMutedState(!muted)
-                if (muted) crowdAmbience(true)
-              }}
-              title="Sound"
-            >
-              {muted ? '🔇' : '🔊'}
-            </button>
+            <SoundPanel />
             <button
               className="h-full shrink-0 rounded-2xl bg-black/60 border border-white/10 px-1.5 sm:px-2 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider"
               onClick={() => {
